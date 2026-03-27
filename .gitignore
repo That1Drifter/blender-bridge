@@ -1,0 +1,28 @@
+__pycache__/
+*.pyc
+*.pyo
+*.zip
+
+# Render outputs
+*.png
+*.jpg
+*.jpeg
+*.exr
+*.hdr
+
+# Blender
+*.blend1
+*.blend2
+
+# Tool artifacts
+.gstack/
+.playwright-mcp/
+.claude/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temp
+*.tmp
+*.bak

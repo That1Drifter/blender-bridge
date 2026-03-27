@@ -1,4 +1,4 @@
-# Blender MCP Addon v2 — Wire Protocol
+# Blender Bridge — Wire Protocol
 #
 # Length-prefixed framing: [4 bytes big-endian uint32 payload length][UTF-8 JSON]
 

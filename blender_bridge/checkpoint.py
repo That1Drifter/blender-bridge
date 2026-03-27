@@ -1,4 +1,4 @@
-# Blender MCP Addon v2 — Undo Checkpoint Management
+# Blender Bridge — Undo Checkpoint Management
 
 import bpy
 import time

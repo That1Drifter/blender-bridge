@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Blender MCP v2 — a production assistant bridge between Claude Code and Blender 3D. **Not a modeling tool** — it handles texturing, scene setup, export pipelines, mesh QA, and asset management while the user does the actual modeling.
+Blender Bridge — a production assistant bridge between Claude Code and Blender 3D. **Not a modeling tool** — it handles texturing, scene setup, export pipelines, mesh QA, and asset management while the user does the actual modeling.
 
-1. **Blender Addon** (`blender_mcp/`): Python package installed as a Blender addon. Runs a TCP server on `localhost:9876` inside Blender's process.
-2. **MCP Server** (`mcp_server.py`): FastMCP wrapper that exposes Blender commands as MCP tools over stdio. Persistent TCP connection with retry.
+1. **Blender Addon** (`blender_bridge/`): Python package installed as a Blender addon. Runs a TCP server on `localhost:9876` inside Blender's process.
+2. **Bridge Server** (`bridge_server.py`): FastMCP wrapper that exposes Blender commands as MCP tools over stdio. Persistent TCP connection with retry.
 
-Data flow: `Claude Code → mcp_server.py (stdio) → TCP socket → blender_mcp addon → Blender Python API (bpy)`
+Data flow: `Claude Code → bridge_server.py (stdio) → TCP socket → blender_bridge addon → Blender Python API (bpy)`
 
 ### Best Used For
 - Texturing & materials (Poly Haven PBR, shader node setup, batch assignment)
@@ -23,27 +23,18 @@ Data flow: `Claude Code → mcp_server.py (stdio) → TCP socket → blender_mcp
 
 ## Build & Deploy
 
-There is no build system. The addon is a plain Python package distributed as a zip.
-
-**Rebuild the addon zip after any code change:**
 ```bash
-cd "C:/Users/Drifter/Desktop/Claude-Blender"
-python -c "import zipfile, os; z=zipfile.ZipFile('blender_mcp.zip','w'); [z.write(os.path.join(r,f), os.path.join(os.path.relpath(r,'.'),f)) for r,d,fs in os.walk('blender_mcp') for f in fs if f.endswith('.py')]; z.close()"
+python build.py
 ```
 
-After rebuilding: user reinstalls via Blender Preferences > Add-ons > Install from Disk, then toggles MCP server restart in Claude Code.
-
-**Syntax check before zipping:**
-```bash
-python -c "import py_compile; import glob; [py_compile.compile(f, doraise=True) for f in glob.glob('blender_mcp/**/*.py', recursive=True)]"
-```
+This syntax-checks all files and builds `blender_bridge.zip`. After rebuilding: reinstall in Blender via Preferences > Add-ons > Install from Disk, then restart Blender and the MCP server.
 
 ## Testing
 
 ```bash
 python test_client.py [port]    # default port: 9876
 ```
-Requires Blender running with the addon connected. The test suite is a sequential 10-test TCP protocol exerciser — not a unit test framework.
+Requires Blender running with the addon connected. The test suite is a sequential TCP protocol exerciser.
 
 ## Architecture
 
@@ -62,13 +53,14 @@ Blender is single-threaded for scene operations. The TCP server runs in a daemon
 | `__init__.py` | Addon entry point, singleton server lifecycle |
 | `server.py` | TCP socket server, client handling, main-thread dispatch |
 | `dispatcher.py` | Command routing, handler registry, auto-diff/checkpoint wrapping |
-| `executor.py` | All mutating command implementations (~1200 lines, 30+ handlers) |
+| `executor.py` | All mutating command implementations (~2400 lines, 48 handlers) |
 | `introspection.py` | Read-only queries + scene snapshot/diff engine |
 | `capture.py` | Viewport screenshots and render capture with thumbnail generation |
 | `checkpoint.py` | Undo checkpoint create/restore via Blender's undo stack |
 | `history.py` | Command execution log (last 500 entries) |
 | `constants.py` | Ports, protocol version, engine aliases, error codes |
 | `ui.py` | Blender sidebar panel and operators |
+| `integrations/polyhaven.py` | Poly Haven CC0 asset API client |
 
 ### Command Execution Pattern
 Every mutating command in `executor.py` follows the same pattern:
@@ -79,11 +71,14 @@ Every mutating command in `executor.py` follows the same pattern:
 
 The dispatcher wraps this with auto-diff (before/after scene snapshots) and history logging.
 
-### Auto-Diff System (`introspection.py`)
-`capture_snapshot()` takes a lightweight scene fingerprint. The dispatcher captures before/after snapshots for mutating commands when `include_diff: true` (default). `compute_diff()` returns added/removed/modified objects and materials.
+### Adding New Tools
+1. Implement handler in `executor.py` (or `introspection.py` if read-only)
+2. Import and register in `dispatcher.py` (add to `_MUTATING_COMMANDS` if scene-modifying)
+3. Add MCP wrapper in `bridge_server.py`
+4. Run `python build.py` to syntax-check and rebuild the zip
 
-### MCP Server (`mcp_server.py`)
-Thin translation layer: each `@mcp.tool()` function maps params to a TCP request, sends it, and returns the response. No business logic lives here.
+### Bridge Server (`bridge_server.py`)
+Thin translation layer with persistent TCP connection and retry logic. Each `@mcp.tool()` function maps params to a TCP request, sends it, and returns the response. No business logic lives here.
 
 ## Key Constants
 
@@ -96,6 +91,5 @@ Thin translation layer: each `@mcp.tool()` function maps params to a TCP request
 ## Working with the Addon
 
 - The addon runs in **Blender's Python**, not the system Python. You cannot import bpy outside Blender.
-- `mcp_server.py` runs in system Python and only needs the `mcp` package.
-- `addon copy.py` is the legacy v1 single-file implementation — kept for reference, not active.
-- The `integrations/` directory is a placeholder for future work (e.g., Poly Haven).
+- `bridge_server.py` runs in system Python and only needs the `mcp` package.
+- The `integrations/` directory contains the Poly Haven client. Add new integrations as modules here.

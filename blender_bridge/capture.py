@@ -1,4 +1,4 @@
-# Blender MCP Addon v2 — Viewport Screenshot & Render Capture
+# Blender Bridge — Viewport Screenshot & Render Capture
 
 import bpy
 import tempfile
@@ -21,7 +21,7 @@ def _resolve_engine(engine: str) -> str:
 
 def _make_thumbnail(source_path: str, thumbnail_size: int = 256) -> str:
     """Create a small JPEG thumbnail from an image file, return base64 string."""
-    thumb_path = tempfile.mktemp(suffix=".jpg", prefix="blender_mcp_thumb_")
+    thumb_path = tempfile.mktemp(suffix=".jpg", prefix="bbridge_thumb_")
     try:
         img = bpy.data.images.load(source_path)
         try:
@@ -75,7 +75,7 @@ def viewport_screenshot(max_size: int = 512, format: str = "PNG",
     if save_to:
         out_path = save_to
     else:
-        out_path = tempfile.mktemp(suffix=ext, prefix="blender_mcp_")
+        out_path = tempfile.mktemp(suffix=ext, prefix="bbridge_")
 
     # Use opengl render for clean 3D-only capture (no UI chrome)
     scene = bpy.context.scene
@@ -188,7 +188,7 @@ def render_image(engine: str = None, samples: int = None,
     if save_to:
         out_path = save_to
     else:
-        out_path = tempfile.mktemp(suffix=ext, prefix="blender_mcp_")
+        out_path = tempfile.mktemp(suffix=ext, prefix="bbridge_")
 
     try:
         # Apply overrides

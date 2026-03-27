@@ -1,6 +1,6 @@
-# Blender MCP v2
+# Blender Bridge
 
-A bridge between Claude Code and Blender that gives Claude direct control over scene setup, materials, export, and asset management. Built for production workflows — not modeling from scratch.
+A production assistant bridge between Claude Code and Blender. Gives Claude direct control over texturing, scene setup, export pipelines, and asset management. Built for production workflows — not modeling from scratch.
 
 ## What This Is For
 
@@ -26,9 +26,9 @@ Claude can't sculpt, retopologize, or do freeform modeling. If you need a charac
 
 ### Install the Blender Addon
 
-1. Download `blender_mcp.zip` from this repo
+1. Download `blender_bridge.zip` from this repo
 2. In Blender: Edit > Preferences > Add-ons > Install from Disk > select the zip
-3. Enable "Blender MCP v2" in the addon list
+3. Enable "Blender Bridge" in the addon list
 4. In the 3D Viewport sidebar (N panel), find "MCP v2" and click "Start Server"
 
 ### Configure Claude Code
@@ -40,17 +40,17 @@ Add to your Claude Code settings (`~/.claude/settings.json`):
   "mcpServers": {
     "blender-mcp": {
       "command": "python",
-      "args": ["path/to/mcp_server.py"]
+      "args": ["path/to/bridge_server.py"]
     }
   }
 }
 ```
 
-Replace `python` with your Python path and `path/to/mcp_server.py` with the actual path.
+Replace `python` with your Python path and `path/to/bridge_server.py` with the actual path.
 
 ### Verify
 
-In Claude Code, the Blender MCP tools should appear. Test with:
+In Claude Code, the Blender Bridge tools should appear. Test with:
 > "Get the current Blender scene info"
 
 ## Example Workflows
@@ -205,11 +205,11 @@ In Claude Code, the Blender MCP tools should appear. Test with:
 ## Architecture
 
 ```
-Claude Code  -->  mcp_server.py (stdio)  -->  TCP :9876  -->  Blender addon  -->  bpy
+Claude Code  -->  bridge_server.py (stdio)  -->  TCP :9876  -->  Blender addon  -->  bpy
 ```
 
-- **mcp_server.py** — MCP tool wrappers, persistent TCP connection with retry
-- **blender_mcp/** — Blender addon package (installed as zip)
+- **bridge_server.py** — MCP tool wrappers, persistent TCP connection with retry
+- **blender_bridge/** — Blender addon package (installed as zip)
   - `executor.py` — All mutating command handlers
   - `introspection.py` — Read-only queries, mesh validation, texture listing
   - `dispatcher.py` — Command routing, auto-diff, history logging

@@ -1,4 +1,4 @@
-# Blender MCP Addon v2 — Command History Log
+# Blender Bridge — Command History Log
 
 import time
 

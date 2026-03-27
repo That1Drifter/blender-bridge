@@ -1,4 +1,4 @@
-# Blender MCP Addon v2 — TCP Socket Server
+# Blender Bridge — TCP Socket Server
 
 import socket
 import threading
@@ -10,7 +10,7 @@ from .protocol import encode_message, read_message, validate_request, make_error
 from .constants import ERR_PROTOCOL_MISMATCH, ERR_INTERNAL_ERROR
 
 
-class BlenderMCPServer:
+class BlenderBridgeServer:
     def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT):
         self.host = host
         self.port = port

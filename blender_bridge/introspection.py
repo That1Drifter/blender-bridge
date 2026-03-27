@@ -1,4 +1,4 @@
-# Blender MCP Addon v2 — Scene Introspection & Diff Engine
+# Blender Bridge — Scene Introspection & Diff Engine
 
 import bpy
 import bmesh

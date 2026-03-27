@@ -1,0 +1,1 @@
+# Blender Bridge — Integrations package

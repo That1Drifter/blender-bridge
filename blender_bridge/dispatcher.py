@@ -1,4 +1,4 @@
-# Blender MCP Addon v2 — Command Dispatcher
+# Blender Bridge — Command Dispatcher
 
 import time
 import traceback

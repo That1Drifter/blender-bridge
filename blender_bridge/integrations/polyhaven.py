@@ -1,4 +1,4 @@
-# Blender MCP v2 — Poly Haven Integration
+# Blender Bridge — Poly Haven Integration
 #
 # CC0 assets from https://polyhaven.com — HDRIs, textures, and 3D models.
 # Uses urllib.request (available in Blender Python, unlike requests).

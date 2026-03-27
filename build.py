@@ -10,8 +10,8 @@ import zipfile
 
 def main():
     root = os.path.dirname(os.path.abspath(__file__))
-    addon_dir = os.path.join(root, "blender_mcp")
-    zip_path = os.path.join(root, "blender_mcp.zip")
+    addon_dir = os.path.join(root, "blender_bridge")
+    zip_path = os.path.join(root, "blender_bridge.zip")
 
     # Syntax check all files first
     print("Checking syntax...")

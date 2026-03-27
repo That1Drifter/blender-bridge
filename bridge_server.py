@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """
-Blender MCP Server — Bridge between Claude Code and Blender MCP Addon v2.
+Blender Bridge Server — MCP interface between Claude Code and Blender.
 
 Exposes Blender commands as MCP tools. Connects to the Blender addon's
 TCP socket server on localhost:9876 using length-prefixed JSON framing.
 
 Usage:
-    python mcp_server.py
+    python bridge_server.py
 """
 
 import struct
@@ -162,7 +162,7 @@ def _mutating_result(r: dict) -> str:
 # MCP Server
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("Blender MCP", dependencies=["mcp"])
+mcp = FastMCP("Blender Bridge", dependencies=["mcp"])
 
 
 # --- Scene Introspection ---

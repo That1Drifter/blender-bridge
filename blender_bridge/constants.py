@@ -1,4 +1,4 @@
-# Blender MCP Addon v2 — Shared Constants
+# Blender Bridge — Shared Constants
 
 PROTOCOL_VERSION = 1
 DEFAULT_PORT = 9876

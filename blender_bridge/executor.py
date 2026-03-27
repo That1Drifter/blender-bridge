@@ -1,4 +1,4 @@
-# Blender MCP Addon v2 — Code Execution
+# Blender Bridge — Code Execution
 
 import io
 import re

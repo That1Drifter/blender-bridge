@@ -35,6 +35,22 @@ Claude can't sculpt, retopologize, or do freeform modeling. If you need a charac
 3. Enable "Blender Bridge" in the addon list
 4. In the 3D Viewport sidebar (N panel), find "MCP v2" and click "Start Server"
 
+### Headless usage
+
+For CI, batch rendering, or any background Blender process, launch the bridge
+directly from this checkout; it does not need to be installed in Blender
+preferences:
+
+```powershell
+& 'C:/Program Files/Blender Foundation/Blender 4.5/blender.exe' --background --factory-startup --python start_bridge.py -- --port 9876
+```
+
+The port defaults to `9876` and can also be set with `BLENDER_BRIDGE_PORT`.
+Background mode supports normal scene operations and `render_image`, but not
+`get_viewport_screenshot`; that command returns `UNSUPPORTED_IN_BACKGROUND`.
+For headless rendering, EEVEE Next may need a GPU; Cycles CPU is the safe
+fallback.
+
 ## Integrations
 
 ### Raw TCP

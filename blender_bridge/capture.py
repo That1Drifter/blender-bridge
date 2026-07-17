@@ -5,7 +5,7 @@ import tempfile
 import base64
 import os
 
-from .constants import ENGINE_ALIASES, VALID_ENGINES
+from .constants import ENGINE_ALIASES, ERR_UNSUPPORTED_IN_BACKGROUND, VALID_ENGINES
 
 
 def _resolve_engine(engine: str) -> str:
@@ -59,6 +59,17 @@ def viewport_screenshot(max_size: int = 512, format: str = "PNG",
     Otherwise saves full-res to a temp file and returns a small JPEG thumbnail as base64
     plus the temp file path for the full image.
     """
+    if bpy.app.background:
+        # The server recognizes this standard error envelope and returns it as
+        # the command response rather than wrapping it as a successful result.
+        return {
+            "status": "error",
+            "error": {
+                "code": ERR_UNSUPPORTED_IN_BACKGROUND,
+                "message": "Viewport screenshots are unavailable in Blender background mode.",
+            },
+        }
+
     # Find the active 3D viewport
     area = None
     for a in bpy.context.screen.areas:
@@ -159,6 +170,9 @@ def render_image(engine: str = None, samples: int = None,
     If save_to is provided, saves full render to that path and returns the path (no base64).
     Otherwise saves full-res to a temp file and returns a small JPEG thumbnail as base64
     plus the temp file path for the full render.
+
+    This works in background mode. EEVEE Next may require a GPU there; Cycles
+    with its CPU device is the safe fallback for headless rendering.
     """
     import time
 

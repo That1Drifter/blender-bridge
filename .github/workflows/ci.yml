@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install linter
+        run: python -m pip install ruff
+      - name: Lint
+        run: ruff check .
+      - name: Build Blender addon
+        run: python build.py
+      - name: Run Blender-free unit tests
+        run: python -m unittest discover tests -p "test_c*.py"
+      - name: Verify addon archive contents
+        run: |
+          unzip -l blender_bridge.zip
+          unzip -Z1 blender_bridge.zip | grep -Fx "blender_bridge/__init__.py"
+      # Actions artifacts expire; release assets are durable, so tags also run the release job.
+      - name: Upload Blender addon artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-bridge-addon
+          path: blender_bridge.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build Blender addon
+        run: python build.py
+      - name: Build bridge tools archive
+        run: |
+          zip -r blender-bridge-tools.zip \
+            bridge_server.py bridge_client bb_client.py start_bridge.py \
+            PROTOCOL.md README.md SECURITY.md
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            blender_bridge.zip
+            blender-bridge-tools.zip

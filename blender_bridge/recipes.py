@@ -6,7 +6,6 @@ history/diff/error boundary and always returns one versioned manifest.
 """
 
 import hashlib
-import math
 import os
 from contextlib import contextmanager
 from pathlib import Path

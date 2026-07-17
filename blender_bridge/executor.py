@@ -11,7 +11,6 @@ import math
 
 import os
 import tempfile
-import urllib.request
 
 from .constants import ALLOW_RAW_EXEC, ENGINE_ALIASES, VALID_ENGINES
 from .history import audit_execution

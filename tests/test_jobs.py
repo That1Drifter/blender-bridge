@@ -1,0 +1,152 @@
+"""End-to-end acceptance test for async Blender Bridge render jobs."""
+
+import os
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+import uuid
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+BLENDER_EXE = Path(os.environ.get(
+    "BLENDER_EXE", r"C:/Program Files/Blender Foundation/Blender 4.5/blender.exe"
+))
+PORT = 9877
+TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
+JOB_FIELDS = {
+    "id", "command", "state", "progress", "created_at", "started_at",
+    "finished_at", "result", "error", "cancel_requested",
+}
+
+sys.path.insert(0, str(REPO_ROOT))
+from bridge_client import BridgeClient  # noqa: E402
+
+
+def wait_for_port(process, timeout=30.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("Blender exited before opening the bridge port")
+        try:
+            with socket.create_connection(("localhost", PORT), timeout=0.25):
+                return
+        except OSError:
+            time.sleep(0.1)
+    raise TimeoutError(f"Bridge did not accept connections on port {PORT} within {timeout}s")
+
+
+def stop_process(process):
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            process.send_signal(signal.SIGINT)
+        process.wait(timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+
+
+@unittest.skipUnless(BLENDER_EXE.is_file(), "Blender not available")
+class AsyncJobBridgeTests(unittest.TestCase):
+    def test_async_render_job(self):
+        output_path = Path(tempfile.gettempdir()) / f"bbridge_job_{uuid.uuid4().hex}.png"
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        process = subprocess.Popen(
+            [
+                str(BLENDER_EXE), "--background", "--factory-startup",
+                "--python", str(REPO_ROOT / "start_bridge.py"), "--", "--port", str(PORT),
+            ],
+            cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            creationflags=creationflags,
+        )
+
+        try:
+            wait_for_port(process)
+            with BridgeClient(port=PORT, timeout=60.0) as client:
+                capabilities = client.send("get_capabilities")
+                self.assertEqual(capabilities["status"], "success", capabilities)
+                self.assertTrue(capabilities["result"]["features"]["jobs"], capabilities)
+
+                submission = client.send(
+                    "render_image",
+                    {
+                        "async_mode": True,
+                        "engine": "WORKBENCH",
+                        "samples": 1,
+                        "resolution": [32, 32],
+                        "save_to": str(output_path),
+                    },
+                )
+                print(f"submission: {submission}")
+                self.assertEqual(submission["status"], "success", submission)
+                self.assertEqual(submission["result"]["state"], "queued", submission)
+                job_id = submission["result"]["job_id"]
+
+                ping = client.send("ping")
+                print(f"ping after submission: {ping}")
+                self.assertEqual(ping["status"], "success", ping)
+                self.assertEqual(ping["result"], "pong", ping)
+
+                first_status = client.send("get_job_status", {"job_id": job_id})
+                print(f"first status: {first_status}")
+                self.assertEqual(first_status["status"], "success", first_status)
+                self.assertEqual(first_status["result"]["id"], job_id, first_status)
+                self.assertEqual(set(first_status["result"]), JOB_FIELDS, first_status)
+
+                deadline = time.monotonic() + 60.0
+                status = first_status
+                while status["result"]["state"] not in TERMINAL_STATES:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"Job did not finish: {status}")
+                    time.sleep(0.05)
+                    status = client.send("get_job_status", {"job_id": job_id})
+
+                print(f"terminal status: {status}")
+                self.assertEqual(status["result"]["state"], "succeeded", status)
+                self.assertIsInstance(status["result"]["result"], dict, status)
+                self.assertEqual(status["result"]["result"]["file_path"], str(output_path), status)
+                self.assertTrue(output_path.is_file(), output_path)
+
+                bogus = client.send("get_job_status", {"job_id": str(uuid.uuid4())})
+                print(f"bogus status: {bogus}")
+                self.assertEqual(bogus["status"], "error", bogus)
+                self.assertEqual(bogus["error"]["code"], "JOB_NOT_FOUND", bogus)
+
+                cancel_finished = client.send("cancel_job", {"job_id": job_id})
+                print(f"cancel finished: {cancel_finished}")
+                self.assertEqual(cancel_finished["status"], "error", cancel_finished)
+                self.assertEqual(cancel_finished["error"]["code"], "INVALID_PARAMS", cancel_finished)
+
+                jobs = client.send("list_jobs")
+                print(f"list jobs: {jobs}")
+                self.assertEqual(jobs["status"], "success", jobs)
+                self.assertTrue(any(job["id"] == job_id for job in jobs["result"]), jobs)
+        finally:
+            stop_process(process)
+            if output_path.exists():
+                output_path.unlink()
+            output = process.stdout.read() if process.stdout else ""
+            if process.stdout:
+                process.stdout.close()
+            if output:
+                print("Blender output:")
+                print(output.rstrip())
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

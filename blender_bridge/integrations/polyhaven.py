@@ -6,10 +6,158 @@
 import json
 import os
 import tempfile
+import threading
 import urllib.request
+import urllib.parse
+
+from .. import constants
 
 API_BASE = "https://api.polyhaven.com"
 HEADERS = {"User-Agent": "blender-mcp/2.0"}
+
+_CACHE_LOCK = threading.RLock()
+_CACHE_FILE_LOCKS = {}
+
+
+class DownloadCancelled(Exception):
+    """Raised when a cooperative Poly Haven transfer is cancelled."""
+
+
+def get_cache_dir():
+    """Return the configured Poly Haven cache directory without creating it."""
+    return (
+        os.environ.get("BLENDER_BRIDGE_PH_CACHE")
+        or constants.POLYHAVEN_CACHE_DIR
+        or os.path.join(tempfile.gettempdir(), "blender_bridge_polyhaven_cache")
+    )
+
+
+def _safe_cache_parts(value, label):
+    """Encode a cache-key component while preserving harmless path nesting."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Poly Haven cache {label} must be a non-empty string")
+    normalized = value.replace("\\", "/")
+    if normalized.startswith("/") or any(part in ("", ".", "..") for part in normalized.split("/")):
+        raise ValueError(f"Unsafe Poly Haven cache {label}: {value!r}")
+    return [urllib.parse.quote(part, safe="-_.") for part in normalized.split("/")]
+
+
+def cache_file_path(asset_id, resolution, filename, cache_dir=None):
+    """Return the completed-file path for an asset/resolution/filename key."""
+    root = cache_dir or get_cache_dir()
+    return os.path.join(
+        root,
+        *_safe_cache_parts(asset_id, "asset id"),
+        *_safe_cache_parts(resolution, "resolution"),
+        *_safe_cache_parts(filename, "filename"),
+    )
+
+
+def cache_manifest_path(asset_id, resolution, asset_type, fmt, cache_dir=None):
+    """Return the plan manifest path for one asset type/format cache variant."""
+    root = cache_dir or get_cache_dir()
+    asset_parts = _safe_cache_parts(asset_id, "asset id")
+    resolution_parts = _safe_cache_parts(resolution, "resolution")
+    type_part = _safe_cache_parts(asset_type, "asset type")
+    format_part = _safe_cache_parts(fmt, "format")
+    return os.path.join(
+        root, *asset_parts, *resolution_parts,
+        ".manifest_" + "_".join(type_part + format_part) + ".json",
+    )
+
+
+def load_cached_manifest(asset_id, resolution, asset_type, fmt):
+    """Load a valid cached transfer plan, or return ``None`` if absent/corrupt."""
+    try:
+        with open(cache_manifest_path(asset_id, resolution, asset_type, fmt), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def save_cached_manifest(asset_id, resolution, asset_type, fmt, plan):
+    """Atomically save a resolved network plan so full cache hits avoid metadata I/O."""
+    destination = cache_manifest_path(asset_id, resolution, asset_type, fmt)
+    part_path = destination + ".part"
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    try:
+        with open(part_path, "w", encoding="utf-8") as f:
+            json.dump(plan, f, sort_keys=True)
+        os.replace(part_path, destination)
+    except Exception:
+        try:
+            os.unlink(part_path)
+        except OSError:
+            pass
+        raise
+
+
+def filename_from_url(url):
+    """Extract a stable cache filename from a download URL."""
+    filename = os.path.basename(urllib.parse.unquote(urllib.parse.urlparse(url).path))
+    if not filename:
+        raise ValueError(f"Poly Haven download URL has no filename: {url!r}")
+    return filename
+
+
+def _file_lock(path):
+    with _CACHE_LOCK:
+        return _CACHE_FILE_LOCKS.setdefault(path, threading.Lock())
+
+
+def download_to_cache(asset_id, resolution, filename, url, *, cancel_requested=None,
+                      progress_callback=None, timeout=120, chunk_size=65536,
+                      cache_dir=None):
+    """Download one file into the atomic Poly Haven cache.
+
+    A completed cache file is returned immediately without opening the URL. New
+    files are written as ``<path>.part`` and atomically promoted with
+    :func:`os.replace`; interrupted and failed writes remove that partial file.
+    ``progress_callback`` receives ``(bytes_written, content_length_or_none)``.
+    """
+    destination = cache_file_path(asset_id, resolution, filename, cache_dir=cache_dir)
+    part_path = destination + ".part"
+
+    with _file_lock(destination):
+        if os.path.isfile(destination):
+            return destination
+
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        try:
+            if cancel_requested and cancel_requested():
+                raise DownloadCancelled("Poly Haven download cancelled")
+
+            req = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw_length = resp.headers.get("Content-Length")
+                try:
+                    content_length = int(raw_length) if raw_length else None
+                except ValueError:
+                    content_length = None
+                written = 0
+                # Opening in wb intentionally overwrites stale/corrupt .part files.
+                with open(part_path, "wb") as f:
+                    while True:
+                        if cancel_requested and cancel_requested():
+                            raise DownloadCancelled("Poly Haven download cancelled")
+                        chunk = resp.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        written += len(chunk)
+                        if progress_callback:
+                            progress_callback(written, content_length)
+                        if cancel_requested and cancel_requested():
+                            raise DownloadCancelled("Poly Haven download cancelled")
+            os.replace(part_path, destination)
+            return destination
+        except Exception:
+            try:
+                os.unlink(part_path)
+            except OSError:
+                pass
+            raise
 
 
 def _api_get(path, params=None):
@@ -84,8 +232,25 @@ def get_asset_info(asset_id):
     return _api_get(f"/files/{asset_id}")
 
 
-def download_file(url, suffix=".tmp"):
-    """Download a file to a temporary location. Returns the temp file path."""
+def download_file(url, suffix=".tmp", *, asset_id=None, resolution=None,
+                  filename=None, cancel_requested=None, progress_callback=None):
+    """Download a file, using the cache when its Poly Haven identity is known.
+
+    The temporary-file fallback remains for compatibility with callers that do
+    not have an asset/resolution cache key yet.
+    """
+    if asset_id is not None or resolution is not None or filename is not None:
+        if asset_id is None or resolution is None:
+            raise ValueError("asset_id and resolution are required for cached downloads")
+        return download_to_cache(
+            asset_id,
+            resolution,
+            filename or filename_from_url(url),
+            url,
+            cancel_requested=cancel_requested,
+            progress_callback=progress_callback,
+        )
+
     req = urllib.request.Request(url, headers=HEADERS)
     with urllib.request.urlopen(req, timeout=120) as resp:
         fd, tmp_path = tempfile.mkstemp(suffix=suffix)

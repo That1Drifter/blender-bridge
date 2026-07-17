@@ -3,48 +3,26 @@
 #
 # Usage: python test_client.py
 
-import socket
-import struct
 import json
 import sys
-import time
+from bridge_client import BridgeClient, BridgeTransportError
 
 HOST = "localhost"
 PORT = 9876
-HEADER_SIZE = 4
 
 
-def encode(obj):
-    payload = json.dumps(obj, separators=(",", ":")).encode("utf-8")
-    return struct.pack(">I", len(payload)) + payload
-
-
-def recv_message(sock):
-    # Read header
-    header = b""
-    while len(header) < HEADER_SIZE:
-        chunk = sock.recv(HEADER_SIZE - len(header))
-        if not chunk:
-            raise ConnectionError("Connection closed while reading header")
-        header += chunk
-
-    length = struct.unpack(">I", header)[0]
-
-    # Read payload
-    payload = b""
-    while len(payload) < length:
-        chunk = sock.recv(length - len(payload))
-        if not chunk:
-            raise ConnectionError("Connection closed while reading payload")
-        payload += chunk
-
-    return json.loads(payload.decode("utf-8"))
-
-
-def send_and_recv(sock, request):
+def send_and_recv(client, request):
     print(f"\n>>> Sending: {request['type']}")
-    sock.sendall(encode(request))
-    response = recv_message(sock)
+    request_fields = {
+        key: value for key, value in request.items()
+        if key not in {"v", "id", "type", "params", "options"}
+    }
+    response = client.send(
+        request["type"],
+        request.get("params"),
+        request.get("options"),
+        request_fields=request_fields or None,
+    )
     print(f"<<< Status: {response.get('status')}")
     print(f"    Result: {json.dumps(response.get('result'), indent=2)[:500]}")
     if response.get("error"):
@@ -58,9 +36,9 @@ def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
 
     print(f"Connecting to {HOST}:{port}...")
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock = BridgeClient(HOST, port)
     try:
-        sock.connect((HOST, port))
+        sock.connect()
         print("Connected!\n")
 
         # Test 1: Ping
@@ -84,7 +62,7 @@ def main():
         print("TEST 3: Execute code — list scene objects")
         r = send_and_recv(sock, {
             "v": 1, "id": "t3", "type": "execute_code",
-            "params": {"code": "for obj in bpy.data.objects:\n    print(f'{obj.name} ({obj.type})')"}
+            "params": {"code": "for obj in bpy.data.objects:\n    print(f'{obj.name} ({obj.type})')", "mode": "safe"}
         })
         assert r["status"] == "success", f"execute_code failed: {r.get('error')}"
         assert r["result"]["executed"] is True, "Code didn't execute!"
@@ -96,7 +74,7 @@ def main():
         print("TEST 4: Execute code — create a cube")
         r = send_and_recv(sock, {
             "v": 1, "id": "t4", "type": "execute_code",
-            "params": {"code": "bpy.ops.mesh.primitive_cube_add(location=(3, 0, 0))\nbpy.context.active_object.name = 'TestCube'\nprint(f'Created {bpy.context.active_object.name}')"}
+            "params": {"code": "bpy.ops.mesh.primitive_cube_add(location=(3, 0, 0))\nbpy.context.active_object.name = 'TestCube'\nprint(f'Created {bpy.context.active_object.name}')", "mode": "safe"}
         })
         assert r["status"] == "success", f"Create cube failed: {r.get('error')}"
         print(f"    stdout: {r['result']['stdout']}")
@@ -107,7 +85,7 @@ def main():
         print("TEST 5: Verify TestCube exists")
         r = send_and_recv(sock, {
             "v": 1, "id": "t5", "type": "execute_code",
-            "params": {"code": "obj = bpy.data.objects['TestCube']\nprint(f'Found: {obj.name} at {list(obj.location)}')"}
+            "params": {"code": "obj = bpy.data.objects['TestCube']\nprint(f'Found: {obj.name} at {list(obj.location)}')", "mode": "safe"}
         })
         assert r["status"] == "success", f"Verify failed: {r.get('error')}"
         print(f"    stdout: {r['result']['stdout']}")
@@ -118,7 +96,7 @@ def main():
         print("TEST 6: Enriched namespace (Vector, math)")
         r = send_and_recv(sock, {
             "v": 1, "id": "t6", "type": "execute_code",
-            "params": {"code": "v = Vector((1, 2, 3))\nprint(f'Vector length: {v.length:.4f}')\nprint(f'Pi: {math.pi:.4f}')"}
+            "params": {"code": "v = Vector((1, 2, 3))\nprint(f'Vector length: {v.length:.4f}')\nprint(f'Pi: {math.pi:.4f}')", "mode": "safe"}
         })
         assert r["status"] == "success", f"Namespace test failed: {r.get('error')}"
         print(f"    stdout: {r['result']['stdout']}")
@@ -131,7 +109,7 @@ def main():
             "v": 1, "id": "t7", "type": "batch",
             "commands": [
                 {"type": "ping", "params": {}},
-                {"type": "execute_code", "params": {"code": "print('batch item 2')"}},
+                {"type": "execute_code", "params": {"code": "print('batch item 2')", "mode": "safe"}},
                 {"type": "ping", "params": {}},
             ],
             "options": {"stop_on_error": True}
@@ -155,7 +133,7 @@ def main():
         print("TEST 9: Bad code execution (should error)")
         r = send_and_recv(sock, {
             "v": 1, "id": "t9", "type": "execute_code",
-            "params": {"code": "raise ValueError('intentional error')"}
+            "params": {"code": "raise ValueError('intentional error')", "mode": "safe"}
         })
         assert r["status"] == "error", "Should have errored!"
         print(f"    Error: {r['error']['message']}")
@@ -263,7 +241,7 @@ def main():
         print("TEST 17: Scene diff — create object")
         r = send_and_recv(sock, {
             "v": 1, "id": "t17", "type": "execute_code",
-            "params": {"code": "bpy.ops.mesh.primitive_uv_sphere_add(location=(5, 0, 0))\nbpy.context.active_object.name = 'DiffTestSphere'"},
+            "params": {"code": "bpy.ops.mesh.primitive_uv_sphere_add(location=(5, 0, 0))\nbpy.context.active_object.name = 'DiffTestSphere'", "mode": "safe"},
             "options": {"include_diff": True}
         })
         assert r["status"] == "success", f"Create sphere failed: {r.get('error')}"
@@ -278,7 +256,7 @@ def main():
         print("TEST 18: Scene diff — move object")
         r = send_and_recv(sock, {
             "v": 1, "id": "t18", "type": "execute_code",
-            "params": {"code": "bpy.data.objects['DiffTestSphere'].location = (10, 5, 2)"},
+            "params": {"code": "bpy.data.objects['DiffTestSphere'].location = (10, 5, 2)", "mode": "safe"},
             "options": {"include_diff": True}
         })
         assert r["status"] == "success", f"Move failed: {r.get('error')}"
@@ -295,7 +273,7 @@ def main():
         print("TEST 19: Scene diff — delete object")
         r = send_and_recv(sock, {
             "v": 1, "id": "t19", "type": "execute_code",
-            "params": {"code": "obj = bpy.data.objects['DiffTestSphere']\nbpy.data.objects.remove(obj, do_unlink=True)"},
+            "params": {"code": "obj = bpy.data.objects['DiffTestSphere']\nbpy.data.objects.remove(obj, do_unlink=True)", "mode": "safe"},
             "options": {"include_diff": True}
         })
         assert r["status"] == "success", f"Delete failed: {r.get('error')}"
@@ -310,7 +288,7 @@ def main():
         print("TEST 20: Scene diff — no changes = null diff")
         r = send_and_recv(sock, {
             "v": 1, "id": "t20", "type": "execute_code",
-            "params": {"code": "x = 1 + 1"},
+            "params": {"code": "x = 1 + 1", "mode": "safe"},
             "options": {"include_diff": True}
         })
         assert r["status"] == "success", f"No-op failed: {r.get('error')}"
@@ -328,7 +306,7 @@ def main():
             # Get first material name via execute_code
             r2 = send_and_recv(sock, {
                 "v": 1, "id": "t21b", "type": "execute_code",
-                "params": {"code": "print(bpy.data.materials[0].name)"}
+                "params": {"code": "print(bpy.data.materials[0].name)", "mode": "safe"}
             })
             mat_name = r2["result"]["stdout"].strip()
             r3 = send_and_recv(sock, {
@@ -368,7 +346,7 @@ def main():
         print("TEST 23: Auto-screenshot in execute_code response")
         r = send_and_recv(sock, {
             "v": 1, "id": "t23", "type": "execute_code",
-            "params": {"code": "print('screenshot test')"},
+            "params": {"code": "print('screenshot test')", "mode": "safe"},
             "options": {"include_screenshot": True, "screenshot_size": 256}
         })
         assert r["status"] == "success", f"Failed: {r.get('error')}"
@@ -407,7 +385,7 @@ def main():
         print("TEST 26: Make changes after checkpoint")
         r = send_and_recv(sock, {
             "v": 1, "id": "t26a", "type": "execute_code",
-            "params": {"code": "bpy.ops.mesh.primitive_cone_add(location=(7, 0, 0))\nbpy.context.active_object.name = 'CheckpointCone'"},
+            "params": {"code": "bpy.ops.mesh.primitive_cone_add(location=(7, 0, 0))\nbpy.context.active_object.name = 'CheckpointCone'", "mode": "safe"},
             "options": {"include_diff": True}
         })
         assert r["status"] == "success", f"Add cone failed: {r.get('error')}"
@@ -415,7 +393,7 @@ def main():
         # Verify it exists
         r = send_and_recv(sock, {
             "v": 1, "id": "t26b", "type": "execute_code",
-            "params": {"code": "print('CheckpointCone' in bpy.data.objects)"}
+            "params": {"code": "print('CheckpointCone' in bpy.data.objects)", "mode": "safe"}
         })
         assert "True" in r["result"]["stdout"], "Cone doesn't exist!"
         print("    Created CheckpointCone, verified it exists")
@@ -444,7 +422,7 @@ def main():
         # Verify cone is gone
         r = send_and_recv(sock, {
             "v": 1, "id": "t28b", "type": "execute_code",
-            "params": {"code": "print('CheckpointCone' in bpy.data.objects)"}
+            "params": {"code": "print('CheckpointCone' in bpy.data.objects)", "mode": "safe"}
         })
         assert "False" in r["result"]["stdout"], "Cone still exists after restore!"
         print("    CheckpointCone successfully undone")
@@ -488,6 +466,18 @@ def main():
         assert r["status"] == "success", f"Safe mode normal code failed: {r.get('error')}"
         assert r["result"]["mode"] == "safe", "Mode not reported as safe!"
         print(f"    stdout: {r['result']['stdout']}")
+        print("PASS")
+
+        # Test 32: Raw exec is disabled by default
+        print("\n" + "=" * 40)
+        print("TEST 32: Raw exec disabled by default")
+        r = send_and_recv(sock, {
+            "v": 1, "id": "t32-raw", "type": "execute_code",
+            "params": {"code": "print('raw execution should be blocked')", "mode": "exec"}
+        })
+        assert r["status"] == "error", "Raw exec should be disabled by default!"
+        assert r["error"]["code"] == "SANDBOX_VIOLATION", r["error"]
+        print(f"    Blocked: {r['error']['message']}")
         print("PASS")
 
         # Test 32: Safe mode — blocks import os
@@ -674,17 +664,17 @@ def main():
         for name in ["TestCube", "StructCube"]:
             send_and_recv(sock, {
                 "v": 1, "id": "cleanup", "type": "execute_code",
-                "params": {"code": f"obj = bpy.data.objects.get('{name}')\nif obj: bpy.data.objects.remove(obj, do_unlink=True)"}
+                "params": {"code": f"obj = bpy.data.objects.get('{name}')\nif obj: bpy.data.objects.remove(obj, do_unlink=True)", "mode": "safe"}
             })
         # Clean up ops-created objects (Sphere, Cone from test 42)
         send_and_recv(sock, {
             "v": 1, "id": "cleanup2", "type": "execute_code",
-            "params": {"code": "for name in ['Sphere', 'Cone']:\n    obj = bpy.data.objects.get(name)\n    if obj: bpy.data.objects.remove(obj, do_unlink=True)"}
+            "params": {"code": "for name in ['Sphere', 'Cone']:\n    obj = bpy.data.objects.get(name)\n    if obj: bpy.data.objects.remove(obj, do_unlink=True)", "mode": "safe"}
         })
         # Clean up material
         send_and_recv(sock, {
             "v": 1, "id": "cleanup3", "type": "execute_code",
-            "params": {"code": "mat = bpy.data.materials.get('TestRed')\nif mat: bpy.data.materials.remove(mat)"}
+            "params": {"code": "mat = bpy.data.materials.get('TestRed')\nif mat: bpy.data.materials.remove(mat)", "mode": "safe"}
         })
         print("    Cleaned up test objects and materials")
 
@@ -692,7 +682,7 @@ def main():
         print("ALL TESTS PASSED (Phase 1 + Phase 2 + Phase 3 + Phase 4)")
         print("=" * 40)
 
-    except ConnectionRefusedError:
+    except BridgeTransportError:
         print("ERROR: Could not connect. Is Blender running with the addon connected?")
         sys.exit(1)
     except AssertionError as e:

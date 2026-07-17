@@ -1,10 +1,14 @@
 # Blender Bridge
 
-A production assistant bridge between Claude Code and Blender. Gives Claude direct control over texturing, scene setup, export pipelines, and asset management. Built for production workflows — not modeling from scratch.
+A production automation bridge for Blender. Its stable API is a localhost
+TCP/JSON protocol that any agent or automation client can use for texturing,
+scene setup, export pipelines, and asset management. Claude Code through MCP
+is one integration, not the protocol itself. See [PROTOCOL.md](PROTOCOL.md)
+for the protocol v1 contract and a raw-socket client example.
 
 ## What This Is For
 
-You model in Blender. Claude handles the tedious parts:
+You model in Blender. Your automation client handles the tedious parts:
 
 - **Texturing** — Pull CC0 PBR materials from Poly Haven, build shader node trees, assign across objects
 - **Scene setup** — HDRI lighting, camera positioning, render settings in one sentence instead of 20 panels
@@ -15,23 +19,50 @@ You model in Blender. Claude handles the tedious parts:
 
 ## What This Is NOT For
 
-Claude can't sculpt, retopologize, or do freeform modeling. If you need a character or hard-surface model, build it yourself (or import one), then use this tool to texture it, light it, validate it, and export it.
+AI assistants cannot replace hands-on sculpting, retopology, or freeform modeling. If you need a character or hard-surface model, build it yourself (or import one), then use this tool to texture it, light it, validate it, and export it.
 
 ## Setup
 
 ### Requirements
-- Blender 4.0+
-- Python 3.10+ (system Python, for the MCP server)
-- Claude Code CLI
+- Blender 4.2-4.5 tested (4.5.8 LTS verified); 4.0+ expected
+- Python 3.10+ (system Python, for the MCP server integration)
+- Claude Code CLI (only for the Claude Code integration below)
 
 ### Install the Blender Addon
 
 1. Download `blender_bridge.zip` from this repo
 2. In Blender: Edit > Preferences > Add-ons > Install from Disk > select the zip
 3. Enable "Blender Bridge" in the addon list
-4. In the 3D Viewport sidebar (N panel), find "MCP v2" and click "Start Server"
+4. In the 3D Viewport sidebar (N panel), open the **Bridge** tab, find the **Blender Bridge** panel, and click **Connect**
 
-### Configure Claude Code
+### Headless usage
+
+For CI, batch rendering, or any background Blender process, launch the bridge
+directly from this checkout; it does not need to be installed in Blender
+preferences:
+
+```powershell
+& 'C:/Program Files/Blender Foundation/Blender 4.5/blender.exe' --background --factory-startup --python start_bridge.py -- --port 9876
+```
+
+The port defaults to `9876` and can also be set with `BLENDER_BRIDGE_PORT`.
+Background mode supports normal scene operations and `render_image`, but not
+`get_viewport_screenshot`; that command returns `UNSUPPORTED_IN_BACKGROUND`.
+For headless rendering, EEVEE Next may need a GPU; Cycles CPU is the safe
+fallback.
+
+## Integrations
+
+### Raw TCP
+
+Any client that can open a TCP socket can use Blender Bridge directly on
+`localhost:9876`. The protocol is the stable API; see [PROTOCOL.md](PROTOCOL.md)
+for framing, envelopes, errors, feature detection, and a stdlib-only Python
+example.
+
+### Claude Code via MCP
+
+Use this optional integration to expose Blender Bridge tools to Claude Code.
 
 Add to your Claude Code settings (`~/.claude/settings.json`):
 
@@ -48,10 +79,36 @@ Add to your Claude Code settings (`~/.claude/settings.json`):
 
 Replace `python` with your Python path and `path/to/bridge_server.py` with the actual path.
 
-### Verify
+### Verify the Claude Code integration
 
 In Claude Code, the Blender Bridge tools should appear. Test with:
 > "Get the current Blender scene info"
+
+### Python client and CLI
+
+`bridge_client` is a bpy-free Python client for the TCP service:
+
+```python
+from bridge_client import BridgeClient
+
+with BridgeClient() as client:
+    print(client.send("get_scene_info"))
+```
+
+Use the CLI either through the installed `blender-bridge` command or the
+backward-compatible script:
+
+```bash
+blender-bridge get_scene_info
+python bb_client.py call get_scene_info
+python bb_client.py call execute_code --json '{"code":"print(len(bpy.data.objects))","mode":"safe"}'
+python bb_client.py export --preset godot --out build/scene.gltf
+```
+
+`execute --file script.py` uses raw `exec` mode and requires enabling **Allow
+Raw Exec** in the Blender Bridge panel. CLI exit codes are `0` for a successful
+response, `1` for a bridge error response, `2` for a connection or transport
+failure, and `3` for invalid arguments or unreadable input files.
 
 ## Example Workflows
 
@@ -205,10 +262,12 @@ In Claude Code, the Blender Bridge tools should appear. Test with:
 ## Architecture
 
 ```
-Claude Code  -->  bridge_server.py (stdio)  -->  TCP :9876  -->  Blender addon  -->  bpy
+Any agent / automation client  -->  TCP/JSON :9876  -->  Blender addon  -->  bpy
+Claude Code  -->  bridge_server.py (stdio/MCP)  -->  TCP/JSON :9876
 ```
 
-- **bridge_server.py** — MCP tool wrappers, persistent TCP connection with retry
+- **TCP/JSON protocol** — Stable local API for any automation client; see [PROTOCOL.md](PROTOCOL.md)
+- **bridge_server.py** — Optional MCP tool wrappers (for example, Claude Code), with a persistent TCP connection and retry
 - **blender_bridge/** — Blender addon package (installed as zip)
   - `executor.py` — All mutating command handlers
   - `introspection.py` — Read-only queries, mesh validation, texture listing

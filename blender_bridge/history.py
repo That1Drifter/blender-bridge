@@ -1,6 +1,52 @@
 # Blender Bridge — Command History Log
 
+import hashlib
+import json
+import os
 import time
+from datetime import datetime, timezone
+
+import bpy
+
+from .constants import AUDIT_LOG_FULL_CODE
+
+
+_AUDIT_LOG_FILENAME = "blender_bridge_audit.jsonl"
+
+
+def _serialize_audit_payload(payload) -> str:
+    """Return a stable text representation for hashing and optional logging."""
+    if isinstance(payload, str):
+        return payload
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def audit_execution(command: str, mode: str, payload, success: bool,
+                    error: Exception | str | None = None) -> None:
+    """Append one best-effort execution record to the persistent JSONL audit log."""
+    try:
+        payload_text = _serialize_audit_payload(payload)
+        payload_bytes = payload_text.encode("utf-8")
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "command": command,
+            "mode": mode,
+            "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+            "payload_size": len(payload_bytes),
+            "success": bool(success),
+            "error": None if error is None else str(error),
+        }
+        if AUDIT_LOG_FULL_CODE:
+            record["payload"] = payload_text
+
+        config_dir = bpy.utils.user_resource("CONFIG")
+        os.makedirs(config_dir, exist_ok=True)
+        log_path = os.path.join(config_dir, _AUDIT_LOG_FILENAME)
+        with open(log_path, "a", encoding="utf-8") as audit_file:
+            audit_file.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except Exception:
+        # Audit logging is deliberately best effort and must not affect execution.
+        pass
 
 
 class CommandHistory:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Blender Bridge Server — MCP interface between Claude Code and Blender.
+Blender Bridge Server — MCP interface between MCP clients and Blender.
 
 Exposes Blender commands as MCP tools. Connects to the Blender addon's
 TCP socket server on localhost:9876 using length-prefixed JSON framing.
@@ -9,25 +9,18 @@ Usage:
     python bridge_server.py
 """
 
-import struct
-import socket
 import json
-import uuid
 from mcp.server.fastmcp import FastMCP
+from bridge_client import BridgeClient
 
 # ---------------------------------------------------------------------------
 # TCP client for Blender addon
 # ---------------------------------------------------------------------------
 
-import time
-
-HEADER_SIZE = 4
 BLENDER_HOST = "localhost"
 BLENDER_PORT = 9876
-PROTOCOL_VERSION = 1
 
 # Timeouts per command category (seconds)
-_TIMEOUT_QUICK = 10
 _TIMEOUT_DEFAULT = 30
 _TIMEOUT_RENDER = 120
 _TIMEOUT_DOWNLOAD = 300
@@ -39,113 +32,19 @@ _SLOW_COMMANDS = {
     "execute_code": _TIMEOUT_RENDER,
 }
 
-
-def _send(sock, msg):
-    payload = json.dumps(msg, separators=(",", ":")).encode("utf-8")
-    sock.sendall(struct.pack(">I", len(payload)) + payload)
-
-
-def _recv(sock):
-    header = b""
-    while len(header) < HEADER_SIZE:
-        chunk = sock.recv(HEADER_SIZE - len(header))
-        if not chunk:
-            raise ConnectionError("Connection closed")
-        header += chunk
-    length = struct.unpack(">I", header)[0]
-    payload = b""
-    while len(payload) < length:
-        chunk = sock.recv(length - len(payload))
-        if not chunk:
-            raise ConnectionError("Connection closed")
-        payload += chunk
-    return json.loads(payload.decode("utf-8"))
-
-
-class BlenderConnection:
-    """Persistent TCP connection to Blender addon with retry logic."""
-
-    def __init__(self, host=BLENDER_HOST, port=BLENDER_PORT, max_retries=3):
-        self._host = host
-        self._port = port
-        self._max_retries = max_retries
-        self._sock = None
-
-    def _connect(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect((self._host, self._port))
-        return sock
-
-    def _ensure_connected(self):
-        """Reuse existing socket or create a new one."""
-        if self._sock is not None:
-            # Quick liveness check — peek for data without blocking
-            try:
-                self._sock.setblocking(False)
-                try:
-                    data = self._sock.recv(1, socket.MSG_PEEK)
-                    if not data:
-                        # Connection closed by server
-                        self._sock = None
-                except BlockingIOError:
-                    pass  # No data waiting — socket is alive
-                finally:
-                    if self._sock:
-                        self._sock.setblocking(True)
-            except (OSError, socket.error):
-                self._sock = None
-
-        if self._sock is None:
-            self._sock = self._connect()
-
-    def close(self):
-        if self._sock:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
-
-    def send_command(self, cmd_type, params=None, options=None):
-        """Send command with retry and per-command timeout."""
-        timeout = _SLOW_COMMANDS.get(cmd_type, _TIMEOUT_DEFAULT)
-        last_error = None
-
-        for attempt in range(self._max_retries):
-            try:
-                self._ensure_connected()
-                self._sock.settimeout(timeout)
-
-                request = {
-                    "v": PROTOCOL_VERSION,
-                    "id": str(uuid.uuid4())[:8],
-                    "type": cmd_type,
-                    "params": params or {},
-                }
-                if options:
-                    request["options"] = options
-
-                _send(self._sock, request)
-                return _recv(self._sock)
-
-            except (ConnectionError, socket.timeout, OSError) as e:
-                last_error = e
-                self.close()
-                if attempt < self._max_retries - 1:
-                    time.sleep(0.5 * (2 ** attempt))
-
-        raise ConnectionError(
-            f"Failed to connect to Blender after {self._max_retries} attempts: {last_error}"
-        )
-
-
 # Global connection instance
-_connection = BlenderConnection()
+_connection = BridgeClient(
+    host=BLENDER_HOST,
+    port=BLENDER_PORT,
+    timeout=_TIMEOUT_DEFAULT,
+    command_timeouts=_SLOW_COMMANDS,
+    max_connect_retries=3,
+)
 
 
 def blender_command(cmd_type: str, params: dict = None, options: dict = None) -> dict:
     """Send a command to Blender and return the response."""
-    return _connection.send_command(cmd_type, params, options)
+    return _connection.send(cmd_type, params, options)
 
 
 def _mutating_result(r: dict) -> str:
@@ -441,13 +340,6 @@ def set_world(color: list = None, strength: float = None, hdri_path: str = "") -
 
 # --- Export ---
 
-@mcp.tool()
-def export_scene(filepath: str, format: str = "GLB") -> str:
-    """Export the scene to a file. Valid formats: GLB, GLTF, FBX, OBJ."""
-    r = blender_command("export_scene", {"filepath": filepath, "format": format})
-    return json.dumps(r.get("result", r), indent=2)
-
-
 # --- Lights ---
 
 @mcp.tool()
@@ -703,9 +595,13 @@ def get_viewport_screenshot(max_size: int = 512, save_to: str = "") -> str:
 @mcp.tool()
 def render_image(engine: str = "", samples: int = 0,
                  resolution_x: int = 512, resolution_y: int = 512,
-                 save_to: str = "") -> str:
-    """Render the scene and return the image. Valid engines: EEVEE, CYCLES, WORKBENCH. If save_to path is provided, saves full render there and returns just the path. Otherwise returns a small JPEG thumbnail as base64 plus a file_path to the full render."""
-    params = {"resolution": [resolution_x, resolution_y], "format": "PNG"}
+                 save_to: str = "", async_mode: bool = False) -> str:
+    """Render the scene and return the image, or queue a job when async_mode is true. Valid engines: EEVEE, CYCLES, WORKBENCH. If save_to path is provided, saves full render there and returns just the path. Otherwise returns a small JPEG thumbnail as base64 plus a file_path to the full render."""
+    params = {
+        "resolution": [resolution_x, resolution_y],
+        "format": "PNG",
+        "async_mode": async_mode,
+    }
     if engine:
         params["engine"] = engine
     if samples:
@@ -715,6 +611,29 @@ def render_image(engine: str = "", samples: int = 0,
     r = blender_command("render_image", params)
     result = r.get("result", r)
     return json.dumps(result, indent=2)
+
+
+# --- Async Jobs ---
+
+@mcp.tool()
+def get_job_status(job_id: str) -> str:
+    """Get the current state, progress, result, or error for an async job."""
+    r = blender_command("get_job_status", {"job_id": job_id})
+    return json.dumps(r.get("result", r), indent=2)
+
+
+@mcp.tool()
+def cancel_job(job_id: str) -> str:
+    """Request cancellation of a queued or running async job."""
+    r = blender_command("cancel_job", {"job_id": job_id})
+    return json.dumps(r.get("result", r), indent=2)
+
+
+@mcp.tool()
+def list_jobs() -> str:
+    """List all async jobs and their current states."""
+    r = blender_command("list_jobs")
+    return json.dumps(r.get("result", r), indent=2)
 
 
 # --- Checkpoints ---
@@ -894,6 +813,53 @@ def export_scene(filepath: str, format: str = "GLB", selected_only: bool = False
     return json.dumps(r.get("result", r), indent=2)
 
 
+# ---------------------------------------------------------------------------
+# High-level asset recipes
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def apply_pbr_material_set(object: str, base_color: str = "", roughness: str = "",
+                           metallic: str = "", normal: str = "", height: str = "",
+                           texture_directory: str = "", material_name: str = "") -> str:
+    """Create and assign one PBR material from texture paths, or auto-detect maps in texture_directory."""
+    params = {"object": object}
+    for key, value in (("base_color", base_color), ("roughness", roughness),
+                       ("metallic", metallic), ("normal", normal), ("height", height),
+                       ("texture_directory", texture_directory), ("material_name", material_name)):
+        if value:
+            params[key] = value
+    return _mutating_result(blender_command("apply_pbr_material_set", params, options={"include_diff": True}))
+
+
+@mcp.tool()
+def validate_game_asset(object: str, max_tris: int = -1) -> str:
+    """Read-only game-asset validation. Returns a versioned recipe manifest with warnings and errors."""
+    params = {"object": object}
+    if max_tris >= 0:
+        params["max_tris"] = max_tris
+    r = blender_command("validate_game_asset", params)
+    return json.dumps(r.get("result", r), indent=2)
+
+
+@mcp.tool()
+def export_game_asset(object: str, out_path: str, preset: str = "godot",
+                      max_tris: int = -1) -> str:
+    """Validate then export exactly one object with preset dayz, godot, or print."""
+    params = {"object": object, "out_path": out_path, "preset": preset}
+    if max_tris >= 0:
+        params["max_tris"] = max_tris
+    return _mutating_result(blender_command("export_game_asset", params, options={"include_diff": True}))
+
+
+@mcp.tool()
+def create_preview_sheet(object: str, out_path: str, resolution: int = 256) -> str:
+    """Render front, side, top, and three-quarter PNG previews; returns their manifest and SHA-256 values."""
+    r = blender_command("create_preview_sheet", {
+        "object": object, "out_path": out_path, "resolution": resolution,
+    }, options={"include_diff": True})
+    return _mutating_result(r)
+
+
 @mcp.tool()
 def generate_lods(object: str, ratios: list = None, collection: str = "",
                   apply: bool = False) -> str:
@@ -984,12 +950,19 @@ def polyhaven_search(asset_type: str = "", categories: str = "",
 
 @mcp.tool()
 def polyhaven_download(asset_id: str, asset_type: str, resolution: str = "1k",
-                       format: str = "", apply_to: str = "") -> str:
+                       format: str = "", apply_to: str = "",
+                       async_mode: bool = False) -> str:
     """Download a Poly Haven asset and import into Blender.
     asset_type: 'hdris' (sets world environment), 'textures' (creates PBR material),
     'models' (imports geometry). resolution: '1k', '2k', '4k'.
-    apply_to: object name to assign texture material to (textures only)."""
-    params = {"asset_id": asset_id, "asset_type": asset_type, "resolution": resolution}
+    apply_to: object name to assign texture material to (textures only). Set
+    async_mode to queue the download and import as a job."""
+    params = {
+        "asset_id": asset_id,
+        "asset_type": asset_type,
+        "resolution": resolution,
+        "async_mode": async_mode,
+    }
     if format:
         params["format"] = format
     if apply_to:

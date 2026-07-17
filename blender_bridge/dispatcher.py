@@ -3,10 +3,14 @@
 import time
 import traceback
 
+import bpy
+
 from .constants import (
     PROTOCOL_VERSION, ERR_UNKNOWN_COMMAND, ERR_EXECUTION_ERROR,
-    ERR_OBJECT_NOT_FOUND, ERR_INVALID_PARAMS,
+    ERR_OBJECT_NOT_FOUND, ERR_INVALID_PARAMS, ERR_CHECKPOINT_INVALID,
+    ERR_SANDBOX_VIOLATION, ERR_JOB_NOT_FOUND,
     DEFAULT_INCLUDE_DIFF, DEFAULT_INCLUDE_SCREENSHOT, DEFAULT_SCREENSHOT_SIZE,
+    ALLOW_RAW_EXEC,
 )
 from .protocol import make_response, make_error_response
 from .executor import (
@@ -28,8 +32,23 @@ from .executor import (
 )
 from . import introspection
 from .capture import viewport_screenshot, render_image
-from .checkpoint import CheckpointManager
+from .checkpoint import CheckpointInvalidError, CheckpointManager
 from .history import CommandHistory
+from .jobs import JobManager, JobNotFoundError
+from .recipes import (
+    apply_pbr_material_set, validate_game_asset, export_game_asset,
+    create_preview_sheet,
+)
+
+
+_RUN_PENDING_JOB_COMMAND = "__blender_bridge_run_pending_job__"
+
+
+class _DiscardResponseClient:
+    """Socket-like sink for a main-thread slice queued behind a real response."""
+
+    def sendall(self, _payload):
+        pass
 
 
 # Commands that mutate the scene and should trigger diff computation
@@ -50,20 +69,31 @@ _MUTATING_COMMANDS = {
     "add_mirror", "array_pattern", "add_constraint", "remove_constraint",
     # Phase 6
     "polyhaven_download",
+    # High-level asset recipes
+    "apply_pbr_material_set", "export_game_asset", "create_preview_sheet",
+}
+
+
+_DEFAULT_OPTIONS = {
+    "include_diff": DEFAULT_INCLUDE_DIFF,
+    "include_screenshot": DEFAULT_INCLUDE_SCREENSHOT,
+    "screenshot_size": DEFAULT_SCREENSHOT_SIZE,
+}
+
+_SCENE_OPTION_PROPERTIES = {
+    "include_diff": "bbridge_auto_diff",
+    "include_screenshot": "bbridge_auto_screenshot",
+    "screenshot_size": "bbridge_screenshot_size",
 }
 
 
 class Dispatcher:
     def __init__(self):
-        self.defaults = {
-            "include_diff": DEFAULT_INCLUDE_DIFF,
-            "include_screenshot": DEFAULT_INCLUDE_SCREENSHOT,
-            "screenshot_size": DEFAULT_SCREENSHOT_SIZE,
-        }
         self._command_count = 0
         self._handlers = {}
         self._checkpoint_mgr = CheckpointManager()
         self._history = CommandHistory()
+        self._job_manager = JobManager()
 
         # Core handlers
         self._handlers["ping"] = self._handle_ping
@@ -81,7 +111,12 @@ class Dispatcher:
 
         # Capture handlers
         self._handlers["get_viewport_screenshot"] = viewport_screenshot
-        self._handlers["render_image"] = render_image
+        self._handlers["render_image"] = self._handle_render_image
+
+        # Async job control-plane handlers (intentionally non-mutating)
+        self._handlers["get_job_status"] = self._job_manager.get
+        self._handlers["cancel_job"] = self._job_manager.cancel
+        self._handlers["list_jobs"] = self._job_manager.list_jobs
 
         # Checkpoint handlers
         self._handlers["create_checkpoint"] = self._checkpoint_mgr.create
@@ -150,6 +185,13 @@ class Dispatcher:
         self._handlers["polyhaven_download"] = polyhaven_download
         self._handlers["get_textures"] = introspection.get_textures
 
+        # High-level asset recipes. Recipes call lower-level handlers directly
+        # and return one terminal manifest instead of redispatching commands.
+        self._handlers["apply_pbr_material_set"] = apply_pbr_material_set
+        self._handlers["validate_game_asset"] = validate_game_asset
+        self._handlers["export_game_asset"] = export_game_asset
+        self._handlers["create_preview_sheet"] = create_preview_sheet
+
     def register_handler(self, command_type: str, handler):
         """Register a command handler. Used by other modules to extend the dispatcher."""
         self._handlers[command_type] = handler
@@ -160,10 +202,17 @@ class Dispatcher:
 
     def dispatch(self, request: dict) -> dict:
         """Route a validated request to its handler and wrap with auto-feedback."""
+        if (
+            request.get("type") == _RUN_PENDING_JOB_COMMAND
+            and request.get("_job_manager") is self._job_manager
+        ):
+            self._job_manager.run_pending(max_jobs=1)
+            return make_response(request_id=request.get("id"), status="success", result=None)
+
         request_id = request.get("id")
         cmd_type = request.get("type")
         params = request.get("params", {})
-        opts = {**self.defaults, **(request.get("options") or {})}
+        opts = self._resolve_options(request.get("options"))
 
         # Capture scene snapshot before execution (for diff)
         want_diff = opts.get("include_diff", False) and cmd_type in _MUTATING_COMMANDS
@@ -205,6 +254,18 @@ class Dispatcher:
         # Log to history
         hist_index = self._history.log(cmd_type, params, result["status"], elapsed_ms)
 
+        # Background timers do not run under start_bridge.py's keep-alive loop.
+        # Queue an internal request behind this real response so the render gets
+        # a later main-thread pump slice without changing server.py.
+        if (
+            bpy.app.background
+            and cmd_type == "render_image"
+            and result["status"] == "success"
+            and isinstance(result.get("result"), dict)
+            and result["result"].get("state") == "queued"
+        ):
+            self._queue_background_job_slice()
+
         if result["status"] == "error":
             resp = result
             resp["v"] = PROTOCOL_VERSION
@@ -234,6 +295,16 @@ class Dispatcher:
         try:
             result = handler(**params)
             return {"status": "success", "result": result}
+        except CheckpointInvalidError as e:
+            return {
+                "status": "error",
+                "error": {"code": ERR_CHECKPOINT_INVALID, "message": str(e)},
+            }
+        except JobNotFoundError as e:
+            return {
+                "status": "error",
+                "error": {"code": ERR_JOB_NOT_FOUND, "message": str(e)},
+            }
         except TypeError as e:
             return {
                 "status": "error",
@@ -252,14 +323,25 @@ class Dispatcher:
         except SandboxViolation as e:
             return {
                 "status": "error",
-                "error": {"code": "SANDBOX_VIOLATION", "message": str(e)},
+                "error": {"code": ERR_SANDBOX_VIOLATION, "message": str(e)},
             }
         except Exception as e:
+            self._invalidate_failed_mutating_command(cmd_type)
             traceback.print_exc()
             return {
                 "status": "error",
                 "error": {"code": ERR_EXECUTION_ERROR, "message": str(e)},
             }
+
+    def _invalidate_failed_mutating_command(self, cmd_type: str):
+        """Discard undo-step assumptions after a mutating handler fails mid-execution.
+
+        Validation errors (TypeError/KeyError/ValueError/SandboxViolation) are raised
+        before a handler's undo_push per the handler pattern, so they leave the undo
+        stack untouched and checkpoints stay valid.
+        """
+        if cmd_type in _MUTATING_COMMANDS:
+            self._checkpoint_mgr.invalidate_all("command_failed")
 
     def _handle_batch(self, request: dict, opts: dict) -> dict:
         """Execute a batch of commands sequentially."""
@@ -284,23 +366,81 @@ class Dispatcher:
     def _handle_ping(self):
         return "pong"
 
+    def _handle_render_image(self, **params):
+        return render_image(_job_manager=self._job_manager, **params)
+
+    def _queue_background_job_slice(self):
+        """Put one internal job runner behind the current socket response."""
+        from . import _get_server
+
+        server = _get_server()
+        if server is None or not server.running:
+            return
+        server._dispatch_on_main_thread(
+            _DiscardResponseClient(),
+            {
+                "v": PROTOCOL_VERSION,
+                "id": None,
+                "type": _RUN_PENDING_JOB_COMMAND,
+                "params": {},
+                "_job_manager": self._job_manager,
+            },
+        )
+
     def _handle_execute_code(self, code: str, mode: str = "exec"):
         if mode == "safe":
             return execute_code_safe(code, history_index=self._command_count)
         elif mode == "exec":
-            return execute_code(code, history_index=self._command_count)
+            return execute_code(
+                code,
+                history_index=self._command_count,
+                allow_raw_exec=self._raw_exec_enabled(),
+            )
         else:
             raise ValueError(f"Unsupported execution mode: {mode}. Use 'exec' or 'safe'.")
 
     def _handle_get_capabilities(self):
-        return {
-            "protocol_version": PROTOCOL_VERSION,
-            "commands": sorted(self._handlers.keys()),
-            "defaults": self.defaults,
-        }
+        return introspection.get_capabilities(
+            self._handlers.keys(),
+            self._resolve_options(),
+            raw_exec=self._raw_exec_enabled(),
+        )
+
+    def _raw_exec_enabled(self):
+        """Return the live raw-execution policy for the active scene."""
+        scene = self._get_active_scene()
+        if scene is None:
+            return ALLOW_RAW_EXEC
+        return getattr(scene, "bbridge_allow_raw_exec", ALLOW_RAW_EXEC)
 
     def _handle_set_defaults(self, **kwargs):
-        for key in ("include_diff", "include_screenshot", "screenshot_size"):
-            if key in kwargs:
-                self.defaults[key] = kwargs[key]
-        return self.defaults
+        scene = self._get_active_scene()
+        if scene is not None:
+            for option, property_name in _SCENE_OPTION_PROPERTIES.items():
+                if option in kwargs and hasattr(scene, property_name):
+                    setattr(scene, property_name, kwargs[option])
+        return self._resolve_options()
+
+    @staticmethod
+    def _get_active_scene():
+        """Return the active scene, or ``None`` before Scene properties are available."""
+        try:
+            return getattr(bpy.context, "scene", None)
+        except (AttributeError, RuntimeError):
+            return None
+
+    def _resolve_options(self, request_options: dict | None = None) -> dict:
+        """Resolve request options as request overrides, scene defaults, then constants.
+
+        The dispatcher is process-global, but Scene properties are per-scene. Reading
+        ``bpy.context.scene`` at dispatch time lets Blender scene switching naturally
+        switch the defaults used by subsequent commands.
+        """
+        options = dict(_DEFAULT_OPTIONS)
+        scene = self._get_active_scene()
+        if scene is not None:
+            for option, property_name in _SCENE_OPTION_PROPERTIES.items():
+                if hasattr(scene, property_name):
+                    options[option] = getattr(scene, property_name, options[option])
+        options.update(request_options or {})
+        return options

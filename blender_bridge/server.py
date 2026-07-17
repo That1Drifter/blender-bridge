@@ -3,6 +3,8 @@
 import socket
 import threading
 import traceback
+import json
+import queue
 import bpy
 
 from .constants import DEFAULT_HOST, DEFAULT_PORT, SOCKET_TIMEOUT, RECV_BUFFER_SIZE
@@ -18,6 +20,9 @@ class BlenderBridgeServer:
         self.socket = None
         self.server_thread = None
         self.dispatcher = None  # set after construction
+        self._request_queue = queue.Queue()
+        self._timer_lock = threading.Lock()
+        self._timer_registered = False
 
     def set_dispatcher(self, dispatcher):
         self.dispatcher = dispatcher
@@ -88,6 +93,14 @@ class BlenderBridgeServer:
                 while True:
                     try:
                         msg, buffer = read_message(buffer)
+                    except json.JSONDecodeError as e:
+                        # The payload cannot be safely parsed; report the protocol error
+                        # before closing because any following frame boundary is untrusted.
+                        print(f"[MCP] Protocol error: invalid JSON: {e}")
+                        self._send(client, make_error_response(
+                            None, ERR_PROTOCOL_MISMATCH, f"Invalid JSON: {e}"
+                        ))
+                        return
                     except ValueError as e:
                         # Oversized message — send error and drop connection
                         print(f"[MCP] Protocol error: {e}")
@@ -103,7 +116,8 @@ class BlenderBridgeServer:
                         self._send(client, make_error_response(msg.get("id"), ERR_PROTOCOL_MISMATCH, err))
                         continue
 
-                    # Dispatch on Blender's main thread via timer
+                    # The socket thread only validates and enqueues work. Blender
+                    # API access always happens in process_pending_requests().
                     self._dispatch_on_main_thread(client, msg)
 
         except Exception as e:
@@ -117,28 +131,91 @@ class BlenderBridgeServer:
                 pass
 
     def _dispatch_on_main_thread(self, client, request):
-        """Schedule command execution on Blender's main thread."""
-        def timer_callback():
-            try:
-                if self.dispatcher:
-                    response = self.dispatcher.dispatch(request)
-                else:
-                    response = make_error_response(
-                        request.get("id"), ERR_INTERNAL_ERROR, "No dispatcher configured"
-                    )
-                self._send(client, response)
-            except Exception as e:
-                print(f"[MCP] Dispatch error: {e}")
-                traceback.print_exc()
-                try:
-                    self._send(client, make_error_response(
-                        request.get("id"), ERR_INTERNAL_ERROR, str(e)
-                    ))
-                except Exception:
-                    pass
-            return None  # don't repeat timer
+        """Queue a validated request for execution on Blender's main thread.
 
-        bpy.app.timers.register(timer_callback, first_interval=0.0)
+        Interactive Blender drains this queue via ``bpy.app.timers``. Background
+        startup uses the same queue from its explicit main-thread pump because
+        timers do not run while its keep-alive loop owns the main thread.
+        """
+        self._request_queue.put((client, request))
+        if not bpy.app.background:
+            self._schedule_timer_dispatch()
+
+    def _schedule_timer_dispatch(self):
+        """Schedule one interactive timer callback to drain the request queue."""
+        with self._timer_lock:
+            if self._timer_registered or not self.running:
+                return
+            self._timer_registered = True
+
+        try:
+            bpy.app.timers.register(self._timer_callback, first_interval=0.0)
+        except Exception:
+            with self._timer_lock:
+                self._timer_registered = False
+            raise
+
+    def _timer_callback(self):
+        """Interactive-mode main-thread dispatch, one request per timer tick."""
+        self.process_pending_requests(max_requests=1)
+        with self._timer_lock:
+            if self.running and not self._request_queue.empty():
+                return 0.0
+            self._timer_registered = False
+        return None
+
+    def process_pending_requests(self, max_requests=None):
+        """Run queued requests on Blender's main thread and return their count.
+
+        ``start_bridge.py`` calls this from its background-mode main loop. It is
+        intentionally public so headless launchers do not need to use timers.
+        """
+        processed = 0
+        while max_requests is None or processed < max_requests:
+            try:
+                client, request = self._request_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._execute_request(client, request)
+            processed += 1
+        return processed
+
+    def _execute_request(self, client, request):
+        """Dispatch one queued request and return its response to the socket."""
+        try:
+            if self.dispatcher:
+                response = self.dispatcher.dispatch(request)
+            else:
+                response = make_error_response(
+                    request.get("id"), ERR_INTERNAL_ERROR, "No dispatcher configured"
+                )
+
+            # Capture handlers can return a standard error envelope without
+            # changing dispatcher handler routing. Convert that envelope back
+            # to the normal top-level protocol error response.
+            result = response.get("result") if isinstance(response, dict) else None
+            if isinstance(result, dict) and result.get("status") == "error":
+                error = result.get("error", {})
+                error_response = make_error_response(
+                    request.get("id"),
+                    error.get("code", ERR_INTERNAL_ERROR),
+                    error.get("message", "Command failed"),
+                    error.get("details"),
+                )
+                for field in ("timing_ms", "history_index"):
+                    if field in response:
+                        error_response[field] = response[field]
+                response = error_response
+            self._send(client, response)
+        except Exception as e:
+            print(f"[MCP] Dispatch error: {e}")
+            traceback.print_exc()
+            try:
+                self._send(client, make_error_response(
+                    request.get("id"), ERR_INTERNAL_ERROR, str(e)
+                ))
+            except Exception:
+                pass
 
     def _send(self, client, response: dict):
         """Send a length-prefixed response to the client."""

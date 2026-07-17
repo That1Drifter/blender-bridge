@@ -5,6 +5,36 @@ import bmesh
 import hashlib
 import json
 
+from .constants import ENGINE_ALIASES, PROTOCOL_VERSION, VALID_ENGINES
+
+
+def get_capabilities(command_names, defaults):
+    """Return protocol-v1 capabilities for the currently running bridge."""
+    # Import lazily: package initialization imports Dispatcher, which imports this
+    # module.  ``bl_info`` has already been defined before that import occurs.
+    from . import bl_info
+
+    return {
+        # Existing protocol-v1 fields.
+        "protocol_version": PROTOCOL_VERSION,
+        "commands": sorted(command_names),
+        "defaults": defaults,
+        # Additive runtime and compatibility details.
+        "addon_version": list(bl_info["version"]),
+        "blender_version": list(bpy.app.version),
+        "blender_version_string": bpy.app.version_string,
+        "background": bpy.app.background,
+        "supported_protocol_versions": [PROTOCOL_VERSION],
+        "supported_render_engines": sorted(VALID_ENGINES),
+        "render_engine_aliases": dict(sorted(ENGINE_ALIASES.items())),
+        "features": {
+            "checkpoints": True,
+            "polyhaven": True,
+            "screenshots": not bpy.app.background,
+            "jobs": False,
+        },
+    }
+
 
 # ---------------------------------------------------------------------------
 # Snapshot data structures (plain dicts for easy serialization)

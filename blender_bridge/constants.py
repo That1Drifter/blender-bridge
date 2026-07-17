@@ -19,6 +19,10 @@ SOCKET_TIMEOUT = 1.0  # seconds, for accept() loop
 RECV_BUFFER_SIZE = 65536
 JOB_TTL_SECONDS = 600
 
+# Poly Haven downloads. ``None`` selects the system temporary directory; set
+# BLENDER_BRIDGE_PH_CACHE to share a durable cache between Blender sessions.
+POLYHAVEN_CACHE_DIR = None
+
 # Security policy
 ALLOW_RAW_EXEC = False
 AUDIT_LOG_FULL_CODE = False

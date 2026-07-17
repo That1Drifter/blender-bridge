@@ -107,6 +107,15 @@ class JobManager:
                 raise ValueError(f"Job '{job_id}' is not queued")
             self._pending.append((job_id, callback))
 
+    def enqueue_main_thread(self, callback):
+        """Queue unbound main-thread work for a running async job.
+
+        Consumers use this when a worker owns the job's running state but must
+        hand its final Blender-only step back to a later main-thread slice.
+        """
+        with self._lock:
+            self._pending.append((None, callback))
+
     def run_pending(self, max_jobs=1):
         """Run up to ``max_jobs`` queued callbacks on the calling thread."""
         ran = 0
@@ -116,9 +125,10 @@ class JobManager:
                 if not self._pending:
                     break
                 job_id, callback = self._pending.popleft()
-                job = self._jobs.get(job_id)
-                if job is None or job["state"] != "queued":
-                    continue
+                if job_id is not None:
+                    job = self._jobs.get(job_id)
+                    if job is None or job["state"] != "queued":
+                        continue
             try:
                 callback()
             except Exception as exc:

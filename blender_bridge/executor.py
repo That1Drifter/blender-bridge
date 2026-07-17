@@ -2218,155 +2218,191 @@ def polyhaven_search(asset_type: str = None, categories: str = None,
     return search_assets(asset_type=asset_type, categories=categories, limit=limit)
 
 
-def polyhaven_download(asset_id: str, asset_type: str, resolution: str = "1k",
-                       format: str = None, apply_to: str = None) -> dict:
-    """Download and import a Poly Haven asset into Blender.
+_PH_MAP_CONNECTIONS = {
+    "diffuse": "Base Color", "color": "Base Color", "albedo": "Base Color",
+    "rough": "Roughness", "roughness": "Roughness",
+    "metal": "Metallic", "metallic": "Metallic",
+    "nor_gl": "Normal", "normal": "Normal",
+}
 
-    Args:
-        asset_id: Asset ID from polyhaven_search results.
-        asset_type: 'hdris', 'textures', or 'models'.
-        resolution: '1k', '2k', '4k', etc.
-        format: File format. Defaults: hdr for HDRIs, jpg for textures, gltf for models.
-        apply_to: Object name to assign texture material to (textures only).
-    """
+
+def _polyhaven_map_input(map_type):
+    for key, input_name in _PH_MAP_CONNECTIONS.items():
+        if key in map_type.lower():
+            return input_name
+    return None
+
+
+def _prepare_polyhaven_plan(asset_id, asset_type, resolution, format):
+    """Resolve metadata into a bpy-free transfer/import plan."""
     from .integrations import polyhaven as ph
 
     asset_type = asset_type.lower()
-    files_data = ph.get_asset_info(asset_id)
+    fmt = format or {"hdris": "hdr", "textures": "jpg", "models": "gltf"}.get(asset_type)
+    if fmt is None:
+        raise ValueError(f"Invalid asset_type '{asset_type}'. Valid: hdris, textures, models")
 
-    bpy.ops.ed.undo_push(message=f"MCP polyhaven_download {asset_id}")
+    cached = ph.load_cached_manifest(asset_id, resolution, asset_type, fmt)
+    if cached and cached.get("files") and all(
+        isinstance(entry, dict)
+        and isinstance(entry.get("filename"), str)
+        and os.path.isfile(ph.cache_file_path(asset_id, resolution, entry["filename"]))
+        for entry in cached["files"]
+    ):
+        for entry in cached["files"]:
+            entry["path"] = ph.cache_file_path(asset_id, resolution, entry["filename"])
+        return cached
+
+    files_data = ph.get_asset_info(asset_id)
+    files = []
 
     if asset_type == "hdris":
-        fmt = format or "hdr"
         url = ph.get_hdri_url(files_data, resolution, fmt)
-        tmp_path = ph.download_file(url, suffix=f".{fmt}")
+        files.append({"role": "hdri", "url": url, "filename": ph.filename_from_url(url)})
+    elif asset_type == "textures":
+        urls = ph.get_texture_urls(files_data, resolution, fmt)
+        if not urls:
+            raise ValueError(f"No texture maps found for '{asset_id}' at {resolution}/{fmt}")
+        for map_type, url in urls.items():
+            if _polyhaven_map_input(map_type):
+                files.append({
+                    "role": "texture", "map_type": map_type, "url": url,
+                    "filename": ph.filename_from_url(url),
+                })
+    elif asset_type == "models":
+        model_info = ph.get_model_files(files_data, resolution, fmt)
+        files.append({
+            "role": "model_main", "url": model_info["main_url"],
+            "filename": model_info["main_filename"], "relative_path": model_info["main_filename"],
+        })
+        for relative_path, url in model_info["includes"].items():
+            files.append({
+                "role": "model_include", "url": url, "filename": relative_path,
+                "relative_path": relative_path,
+            })
+    else:
+        raise ValueError(f"Invalid asset_type '{asset_type}'. Valid: hdris, textures, models")
 
-        try:
-            # Set up world environment
-            world = bpy.context.scene.world
-            if not world:
-                world = bpy.data.worlds.new("World")
-                bpy.context.scene.world = world
-            world.use_nodes = True
-            tree = world.node_tree
-            tree.nodes.clear()
+    plan = {
+        "asset_id": asset_id,
+        "asset_type": asset_type,
+        "resolution": resolution,
+        "format": fmt,
+        "files": files,
+    }
+    ph.save_cached_manifest(asset_id, resolution, asset_type, fmt, plan)
+    return plan
 
-            tex_coord = tree.nodes.new("ShaderNodeTexCoord")
-            tex_coord.location = (-800, 0)
-            mapping = tree.nodes.new("ShaderNodeMapping")
-            mapping.location = (-600, 0)
-            env_tex = tree.nodes.new("ShaderNodeTexEnvironment")
-            env_tex.location = (-300, 0)
-            env_tex.image = bpy.data.images.load(tmp_path)
-            env_tex.image.name = f"PH_{asset_id}"
-            # Color space
-            for cs in ("Linear", "Linear Rec.709", "Non-Color"):
-                try:
-                    env_tex.image.colorspace_settings.name = cs
-                    break
-                except TypeError:
-                    continue
-            env_tex.image.pack()
 
-            background = tree.nodes.new("ShaderNodeBackground")
-            background.location = (-100, 0)
-            output = tree.nodes.new("ShaderNodeOutputWorld")
-            output.location = (100, 0)
+def _stage_polyhaven_plan(plan, cancel_requested=None, progress_callback=None):
+    """Perform all network I/O for a plan and return only completed cache paths."""
+    from .integrations import polyhaven as ph
 
-            tree.links.new(tex_coord.outputs["Generated"], mapping.inputs["Vector"])
-            tree.links.new(mapping.outputs["Vector"], env_tex.inputs["Vector"])
-            tree.links.new(env_tex.outputs["Color"], background.inputs["Color"])
-            tree.links.new(background.outputs["Background"], output.inputs["Surface"])
-        finally:
+    total = len(plan["files"])
+    for index, entry in enumerate(plan["files"]):
+        def file_progress(written, content_length, completed=index):
+            if progress_callback and content_length:
+                progress_callback((completed + min(1.0, written / content_length)) / total)
+
+        entry["path"] = ph.download_to_cache(
+            plan["asset_id"], plan["resolution"], entry["filename"], entry["url"],
+            cancel_requested=cancel_requested,
+            progress_callback=file_progress,
+        )
+        if progress_callback:
+            progress_callback((index + 1) / total)
+    return plan
+
+
+def _polyhaven_safe_join(root, relative_path):
+    normalized = relative_path.replace("\\", "/")
+    if normalized.startswith("/") or any(part in ("", ".", "..") for part in normalized.split("/")):
+        raise ValueError(f"Unsafe model include path: {relative_path!r}")
+    return os.path.join(root, *normalized.split("/"))
+
+
+def _import_staged_polyhaven(plan, apply_to):
+    """Perform the Blender-only import phase from completed cache files."""
+    bpy.ops.ed.undo_push(message=f"MCP polyhaven_download {plan['asset_id']}")
+    asset_id = plan["asset_id"]
+
+    if plan["asset_type"] == "hdris":
+        image_path = plan["files"][0]["path"]
+        world = bpy.context.scene.world
+        if not world:
+            world = bpy.data.worlds.new("World")
+            bpy.context.scene.world = world
+        world.use_nodes = True
+        tree = world.node_tree
+        tree.nodes.clear()
+        tex_coord = tree.nodes.new("ShaderNodeTexCoord")
+        tex_coord.location = (-800, 0)
+        mapping = tree.nodes.new("ShaderNodeMapping")
+        mapping.location = (-600, 0)
+        env_tex = tree.nodes.new("ShaderNodeTexEnvironment")
+        env_tex.location = (-300, 0)
+        env_tex.image = bpy.data.images.load(image_path)
+        env_tex.image.name = f"PH_{asset_id}"
+        for color_space in ("Linear", "Linear Rec.709", "Non-Color"):
             try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-
+                env_tex.image.colorspace_settings.name = color_space
+                break
+            except TypeError:
+                continue
+        env_tex.image.pack()
+        background = tree.nodes.new("ShaderNodeBackground")
+        background.location = (-100, 0)
+        output = tree.nodes.new("ShaderNodeOutputWorld")
+        output.location = (100, 0)
+        tree.links.new(tex_coord.outputs["Generated"], mapping.inputs["Vector"])
+        tree.links.new(mapping.outputs["Vector"], env_tex.inputs["Vector"])
+        tree.links.new(env_tex.outputs["Color"], background.inputs["Color"])
+        tree.links.new(background.outputs["Background"], output.inputs["Surface"])
         return {
-            "asset_id": asset_id,
-            "type": "hdri",
-            "resolution": resolution,
+            "asset_id": asset_id, "type": "hdri", "resolution": plan["resolution"],
             "image": env_tex.image.name,
         }
 
-    elif asset_type == "textures":
-        fmt = format or "jpg"
-        urls = ph.get_texture_urls(files_data, resolution, fmt)
-        if not urls:
-            raise ValueError(
-                f"No texture maps found for '{asset_id}' at {resolution}/{fmt}"
-            )
-
-        # Create PBR material with all available maps
+    if plan["asset_type"] == "textures":
         mat = bpy.data.materials.new(name=f"PH_{asset_id}")
         mat.use_nodes = True
         tree = mat.node_tree
         tree.nodes.clear()
-
-        # Core nodes
         tex_coord = tree.nodes.new("ShaderNodeTexCoord")
         tex_coord.location = (-1000, 0)
         mapping = tree.nodes.new("ShaderNodeMapping")
         mapping.location = (-800, 0)
         tree.links.new(tex_coord.outputs["UV"], mapping.inputs["Vector"])
-
         principled = tree.nodes.new("ShaderNodeBsdfPrincipled")
         principled.location = (0, 0)
         output = tree.nodes.new("ShaderNodeOutputMaterial")
         output.location = (300, 0)
         tree.links.new(principled.outputs["BSDF"], output.inputs["Surface"])
 
-        # Map types to Principled BSDF inputs
-        map_connections = {
-            "diffuse": "Base Color", "color": "Base Color", "albedo": "Base Color",
-            "rough": "Roughness", "roughness": "Roughness",
-            "metal": "Metallic", "metallic": "Metallic",
-            "nor_gl": "Normal", "normal": "Normal",
-        }
-
         loaded_maps = []
         y_offset = 300
+        for entry in plan["files"]:
+            map_type = entry["map_type"]
+            bsdf_input = _polyhaven_map_input(map_type)
+            tex_node = tree.nodes.new("ShaderNodeTexImage")
+            tex_node.location = (-400, y_offset)
+            tex_node.image = bpy.data.images.load(entry["path"])
+            tex_node.image.name = f"PH_{asset_id}_{map_type}"
+            tex_node.image.colorspace_settings.name = (
+                "sRGB" if bsdf_input == "Base Color" else "Non-Color"
+            )
+            tex_node.image.pack()
+            tree.links.new(mapping.outputs["Vector"], tex_node.inputs["Vector"])
+            if bsdf_input == "Normal":
+                normal_node = tree.nodes.new("ShaderNodeNormalMap")
+                normal_node.location = (-200, y_offset)
+                tree.links.new(tex_node.outputs["Color"], normal_node.inputs["Color"])
+                tree.links.new(normal_node.outputs["Normal"], principled.inputs["Normal"])
+            else:
+                tree.links.new(tex_node.outputs["Color"], principled.inputs[bsdf_input])
+            loaded_maps.append(map_type)
+            y_offset -= 300
 
-        for map_type, url in urls.items():
-            bsdf_input = None
-            for key, inp in map_connections.items():
-                if key in map_type.lower():
-                    bsdf_input = inp
-                    break
-            if not bsdf_input:
-                continue  # Skip unknown map types
-
-            tmp_path = ph.download_file(url, suffix=f".{fmt}")
-            try:
-                tex_node = tree.nodes.new("ShaderNodeTexImage")
-                tex_node.location = (-400, y_offset)
-                tex_node.image = bpy.data.images.load(tmp_path)
-                tex_node.image.name = f"PH_{asset_id}_{map_type}"
-
-                is_color = bsdf_input == "Base Color"
-                tex_node.image.colorspace_settings.name = "sRGB" if is_color else "Non-Color"
-                tex_node.image.pack()
-
-                tree.links.new(mapping.outputs["Vector"], tex_node.inputs["Vector"])
-
-                if bsdf_input == "Normal":
-                    normal_node = tree.nodes.new("ShaderNodeNormalMap")
-                    normal_node.location = (-200, y_offset)
-                    tree.links.new(tex_node.outputs["Color"], normal_node.inputs["Color"])
-                    tree.links.new(normal_node.outputs["Normal"], principled.inputs["Normal"])
-                else:
-                    tree.links.new(tex_node.outputs["Color"], principled.inputs[bsdf_input])
-
-                loaded_maps.append(map_type)
-                y_offset -= 300
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-
-        # Apply to object if requested
         if apply_to:
             obj = bpy.data.objects.get(apply_to)
             if obj:
@@ -2374,91 +2410,164 @@ def polyhaven_download(asset_id: str, asset_type: str, resolution: str = "1k",
                     obj.data.materials[0] = mat
                 else:
                     obj.data.materials.append(mat)
-
         return {
-            "asset_id": asset_id,
-            "type": "texture",
-            "material": mat.name,
-            "resolution": resolution,
-            "maps_loaded": loaded_maps,
+            "asset_id": asset_id, "type": "texture", "material": mat.name,
+            "resolution": plan["resolution"], "maps_loaded": loaded_maps,
             "applied_to": apply_to,
         }
 
-    elif asset_type == "models":
-        import shutil
+    import shutil
 
-        fmt = format or "gltf"
-        model_info = ph.get_model_files(files_data, resolution, fmt)
+    tmp_dir = tempfile.mkdtemp(prefix="ph_model_")
+    try:
+        for entry in plan["files"]:
+            destination = _polyhaven_safe_join(tmp_dir, entry["relative_path"])
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            shutil.copy2(entry["path"], destination)
+            if entry["role"] == "model_main":
+                main_path = destination
 
-        # Download into a temp directory to preserve relative paths
-        tmp_dir = tempfile.mkdtemp(prefix="ph_model_")
+        before_names = set(obj.name for obj in bpy.data.objects)
+        fmt = plan["format"]
+        if fmt in ("gltf", "glb"):
+            bpy.ops.import_scene.gltf(filepath=main_path)
+        elif fmt == "fbx":
+            bpy.ops.import_scene.fbx(filepath=main_path)
+        elif fmt == "obj":
+            bpy.ops.wm.obj_import(filepath=main_path)
+        else:
+            raise ValueError(f"Unsupported model format: {fmt}")
+        new_objects = sorted(set(obj.name for obj in bpy.data.objects) - before_names)
+        for image in bpy.data.images:
+            if image.filepath and tmp_dir in image.filepath.replace("\\", "/"):
+                try:
+                    image.pack()
+                except Exception:
+                    pass
+    finally:
         try:
-            # Download main file
-            main_path = os.path.join(tmp_dir, model_info["main_filename"])
-            req = urllib.request.Request(model_info["main_url"],
-                                         headers={"User-Agent": "blender-mcp/2.0"})
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                with open(main_path, "wb") as f:
-                    while True:
-                        chunk = resp.read(65536)
-                        if not chunk:
-                            break
-                        f.write(chunk)
+            shutil.rmtree(tmp_dir)
+        except OSError:
+            pass
+    return {
+        "asset_id": asset_id, "type": "model", "format": plan["format"],
+        "imported_objects": new_objects,
+        "includes_downloaded": len(plan["files"]) - 1,
+    }
 
-            # Download include files (textures, .bin, etc.)
-            for rel_path, inc_url in model_info["includes"].items():
-                inc_path = os.path.join(tmp_dir, rel_path)
-                os.makedirs(os.path.dirname(inc_path), exist_ok=True)
-                req = urllib.request.Request(inc_url,
-                                             headers={"User-Agent": "blender-mcp/2.0"})
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    with open(inc_path, "wb") as f:
-                        while True:
-                            chunk = resp.read(65536)
-                            if not chunk:
-                                break
-                            f.write(chunk)
 
-            # Import into Blender
-            before_names = set(o.name for o in bpy.data.objects)
-            if fmt in ("gltf", "glb"):
-                bpy.ops.import_scene.gltf(filepath=main_path)
-            elif fmt == "fbx":
-                bpy.ops.import_scene.fbx(filepath=main_path)
-            elif fmt == "obj":
-                bpy.ops.wm.obj_import(filepath=main_path)
-            else:
-                raise ValueError(f"Unsupported model format: {fmt}")
+def _queue_polyhaven_background_slice():
+    """Reuse the existing background main-thread job-slice mechanism."""
+    from . import _dispatcher_instance
 
-            after_names = set(o.name for o in bpy.data.objects)
-            new_objects = sorted(after_names - before_names)
+    if _dispatcher_instance is None:
+        raise RuntimeError("Async Poly Haven download requires an active dispatcher")
+    _dispatcher_instance._queue_background_job_slice()
 
-            # Pack all images so the .blend is portable
-            for img in bpy.data.images:
-                if img.filepath and tmp_dir in img.filepath.replace("\\", "/"):
-                    try:
-                        img.pack()
-                    except Exception:
-                        pass
 
+def polyhaven_download(asset_id: str, asset_type: str, resolution: str = "1k",
+                       format: str = None, apply_to: str = None,
+                       async_mode: bool = False, _job_manager=None, **kwargs) -> dict:
+    """Download and import a Poly Haven asset.
+
+    Async jobs have two strict phases: a plain worker thread resolves metadata
+    and stages all network files in the cache, then a Blender main-thread slice
+    imports those completed files. ``async`` is accepted as a wire alias for
+    ``async_mode``.
+    """
+    if "async" in kwargs:
+        alias_value = kwargs.pop("async")
+        if async_mode not in (False, alias_value):
+            raise ValueError("async and async_mode must not conflict")
+        async_mode = alias_value
+    if kwargs:
+        key = next(iter(kwargs))
+        raise TypeError(f"polyhaven_download() got an unexpected keyword argument '{key}'")
+    if not isinstance(async_mode, bool):
+        raise ValueError("async_mode must be a boolean")
+
+    if not async_mode:
+        plan = _prepare_polyhaven_plan(asset_id, asset_type, resolution, format)
+        _stage_polyhaven_plan(plan)
+        return _import_staged_polyhaven(plan, apply_to)
+
+    if _job_manager is None:
+        from . import _dispatcher_instance
+        _job_manager = getattr(_dispatcher_instance, "_job_manager", None)
+    if _job_manager is None:
+        raise RuntimeError("Async Poly Haven download requires a job manager")
+
+    import threading
+    import time
+
+    job_args = {
+        "asset_id": asset_id, "asset_type": asset_type, "resolution": resolution,
+        "format": format, "apply_to": apply_to,
+    }
+    job_id = _job_manager.create("polyhaven_download", job_args)["id"]
+    background_mode = bpy.app.background  # Read only on the caller's main thread.
+    state = {"plan": None, "done": threading.Event()}
+
+    def cancelled():
+        return _job_manager.get(job_id)["cancel_requested"]
+
+    def worker():
+        try:
+            if _job_manager.get(job_id)["state"] != "queued":
+                return
+            _job_manager.mark_running(job_id, progress=0.0)
+            if cancelled():
+                _job_manager.mark_cancelled(job_id)
+                return
+            plan = _prepare_polyhaven_plan(asset_id, asset_type, resolution, format)
+            if cancelled():
+                _job_manager.mark_cancelled(job_id)
+                return
+            state["plan"] = _stage_polyhaven_plan(
+                plan,
+                cancel_requested=cancelled,
+                progress_callback=lambda progress: _job_manager.set_progress(job_id, progress),
+            )
+        except Exception as exc:
+            from .integrations.polyhaven import DownloadCancelled
+            if isinstance(exc, DownloadCancelled):
+                _job_manager.mark_cancelled(job_id, str(exc))
+            elif _job_manager.get(job_id)["state"] in {"queued", "running"}:
+                _job_manager.mark_failed(job_id, str(exc))
         finally:
-            try:
-                shutil.rmtree(tmp_dir)
-            except OSError:
-                pass
+            state["done"].set()
 
-        return {
-            "asset_id": asset_id,
-            "type": "model",
-            "format": fmt,
-            "imported_objects": new_objects,
-            "includes_downloaded": len(model_info["includes"]),
-        }
+    def finish_on_main_thread():
+        if not state["done"].is_set():
+            if background_mode:
+                # Background Blender has no timer pump. Keep this bounded slice
+                # short, then queue its successor behind the bridge response.
+                time.sleep(0.05)
+                _job_manager.enqueue_main_thread(finish_on_main_thread)
+                _queue_polyhaven_background_slice()
+                return
+            return 0.05
+        job = _job_manager.get(job_id)
+        if job["state"] in {"failed", "cancelled", "succeeded"}:
+            return None
+        if job["cancel_requested"]:
+            _job_manager.mark_cancelled(job_id)
+            return None
+        try:
+            _job_manager.mark_succeeded(
+                job_id, _import_staged_polyhaven(state["plan"], apply_to)
+            )
+        except Exception as exc:
+            _job_manager.mark_failed(job_id, str(exc))
+        return None
 
+    threading.Thread(target=worker, name=f"polyhaven-{job_id[:8]}", daemon=True).start()
+    if background_mode:
+        _job_manager.enqueue_main_thread(finish_on_main_thread)
+        _queue_polyhaven_background_slice()
     else:
-        raise ValueError(
-            f"Invalid asset_type '{asset_type}'. Valid: hdris, textures, models"
-        )
+        bpy.app.timers.register(finish_on_main_thread, first_interval=0.0)
+    return {"job_id": job_id, "state": "queued"}
 
 
 OPERATION_REGISTRY = {

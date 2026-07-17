@@ -441,13 +441,6 @@ def set_world(color: list = None, strength: float = None, hdri_path: str = "") -
 
 # --- Export ---
 
-@mcp.tool()
-def export_scene(filepath: str, format: str = "GLB") -> str:
-    """Export the scene to a file. Valid formats: GLB, GLTF, FBX, OBJ."""
-    r = blender_command("export_scene", {"filepath": filepath, "format": format})
-    return json.dumps(r.get("result", r), indent=2)
-
-
 # --- Lights ---
 
 @mcp.tool()

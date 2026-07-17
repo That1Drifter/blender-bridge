@@ -3,6 +3,8 @@
 import time
 import traceback
 
+import bpy
+
 from .constants import (
     PROTOCOL_VERSION, ERR_UNKNOWN_COMMAND, ERR_EXECUTION_ERROR,
     ERR_OBJECT_NOT_FOUND, ERR_INVALID_PARAMS, ERR_CHECKPOINT_INVALID,
@@ -53,13 +55,21 @@ _MUTATING_COMMANDS = {
 }
 
 
+_DEFAULT_OPTIONS = {
+    "include_diff": DEFAULT_INCLUDE_DIFF,
+    "include_screenshot": DEFAULT_INCLUDE_SCREENSHOT,
+    "screenshot_size": DEFAULT_SCREENSHOT_SIZE,
+}
+
+_SCENE_OPTION_PROPERTIES = {
+    "include_diff": "bbridge_auto_diff",
+    "include_screenshot": "bbridge_auto_screenshot",
+    "screenshot_size": "bbridge_screenshot_size",
+}
+
+
 class Dispatcher:
     def __init__(self):
-        self.defaults = {
-            "include_diff": DEFAULT_INCLUDE_DIFF,
-            "include_screenshot": DEFAULT_INCLUDE_SCREENSHOT,
-            "screenshot_size": DEFAULT_SCREENSHOT_SIZE,
-        }
         self._command_count = 0
         self._handlers = {}
         self._checkpoint_mgr = CheckpointManager()
@@ -163,7 +173,7 @@ class Dispatcher:
         request_id = request.get("id")
         cmd_type = request.get("type")
         params = request.get("params", {})
-        opts = {**self.defaults, **(request.get("options") or {})}
+        opts = self._resolve_options(request.get("options"))
 
         # Capture scene snapshot before execution (for diff)
         want_diff = opts.get("include_diff", False) and cmd_type in _MUTATING_COMMANDS
@@ -309,14 +319,36 @@ class Dispatcher:
             raise ValueError(f"Unsupported execution mode: {mode}. Use 'exec' or 'safe'.")
 
     def _handle_get_capabilities(self):
-        return {
-            "protocol_version": PROTOCOL_VERSION,
-            "commands": sorted(self._handlers.keys()),
-            "defaults": self.defaults,
-        }
+        return introspection.get_capabilities(self._handlers.keys(), self._resolve_options())
 
     def _handle_set_defaults(self, **kwargs):
-        for key in ("include_diff", "include_screenshot", "screenshot_size"):
-            if key in kwargs:
-                self.defaults[key] = kwargs[key]
-        return self.defaults
+        scene = self._get_active_scene()
+        if scene is not None:
+            for option, property_name in _SCENE_OPTION_PROPERTIES.items():
+                if option in kwargs and hasattr(scene, property_name):
+                    setattr(scene, property_name, kwargs[option])
+        return self._resolve_options()
+
+    @staticmethod
+    def _get_active_scene():
+        """Return the active scene, or ``None`` before Scene properties are available."""
+        try:
+            return getattr(bpy.context, "scene", None)
+        except (AttributeError, RuntimeError):
+            return None
+
+    def _resolve_options(self, request_options: dict | None = None) -> dict:
+        """Resolve request options as request overrides, scene defaults, then constants.
+
+        The dispatcher is process-global, but Scene properties are per-scene. Reading
+        ``bpy.context.scene`` at dispatch time lets Blender scene switching naturally
+        switch the defaults used by subsequent commands.
+        """
+        options = dict(_DEFAULT_OPTIONS)
+        scene = self._get_active_scene()
+        if scene is not None:
+            for option, property_name in _SCENE_OPTION_PROPERTIES.items():
+                if hasattr(scene, property_name):
+                    options[option] = getattr(scene, property_name, options[option])
+        options.update(request_options or {})
+        return options

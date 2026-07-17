@@ -14,9 +14,6 @@ DEFAULT_INCLUDE_SCREENSHOT = False
 DEFAULT_SCREENSHOT_SIZE = 512
 DEFAULT_SCREENSHOT_FORMAT = "PNG"
 
-# Checkpoint defaults
-AUTO_CHECKPOINT_INTERVAL = 10  # commands between auto-checkpoints, 0 = disabled
-
 # Server
 SOCKET_TIMEOUT = 1.0  # seconds, for accept() loop
 RECV_BUFFER_SIZE = 65536

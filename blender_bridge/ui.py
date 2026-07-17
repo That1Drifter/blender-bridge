@@ -75,14 +75,21 @@ CLASSES = [
 
 
 def register_properties():
-    from .constants import DEFAULT_PORT, DEFAULT_SCREENSHOT_SIZE
+    from .constants import (
+        DEFAULT_INCLUDE_DIFF, DEFAULT_INCLUDE_SCREENSHOT, DEFAULT_PORT,
+        DEFAULT_SCREENSHOT_SIZE,
+    )
     bpy.types.Scene.bbridge_port = IntProperty(
         name="Port", default=DEFAULT_PORT, min=1024, max=65535
     )
     bpy.types.Scene.bbridge_connected = BoolProperty(name="Connected", default=False)
     bpy.types.Scene.bbridge_show_defaults = BoolProperty(name="Show Defaults", default=False)
-    bpy.types.Scene.bbridge_auto_diff = BoolProperty(name="Auto Diff", default=True)
-    bpy.types.Scene.bbridge_auto_screenshot = BoolProperty(name="Auto Screenshot", default=False)
+    bpy.types.Scene.bbridge_auto_diff = BoolProperty(
+        name="Auto Diff", default=DEFAULT_INCLUDE_DIFF
+    )
+    bpy.types.Scene.bbridge_auto_screenshot = BoolProperty(
+        name="Auto Screenshot", default=DEFAULT_INCLUDE_SCREENSHOT
+    )
     bpy.types.Scene.bbridge_screenshot_size = IntProperty(
         name="Screenshot Size", default=DEFAULT_SCREENSHOT_SIZE, min=256, max=2048
     )

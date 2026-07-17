@@ -9,25 +9,18 @@ Usage:
     python bridge_server.py
 """
 
-import struct
-import socket
 import json
-import uuid
 from mcp.server.fastmcp import FastMCP
+from bridge_client import BridgeClient
 
 # ---------------------------------------------------------------------------
 # TCP client for Blender addon
 # ---------------------------------------------------------------------------
 
-import time
-
-HEADER_SIZE = 4
 BLENDER_HOST = "localhost"
 BLENDER_PORT = 9876
-PROTOCOL_VERSION = 1
 
 # Timeouts per command category (seconds)
-_TIMEOUT_QUICK = 10
 _TIMEOUT_DEFAULT = 30
 _TIMEOUT_RENDER = 120
 _TIMEOUT_DOWNLOAD = 300
@@ -39,113 +32,19 @@ _SLOW_COMMANDS = {
     "execute_code": _TIMEOUT_RENDER,
 }
 
-
-def _send(sock, msg):
-    payload = json.dumps(msg, separators=(",", ":")).encode("utf-8")
-    sock.sendall(struct.pack(">I", len(payload)) + payload)
-
-
-def _recv(sock):
-    header = b""
-    while len(header) < HEADER_SIZE:
-        chunk = sock.recv(HEADER_SIZE - len(header))
-        if not chunk:
-            raise ConnectionError("Connection closed")
-        header += chunk
-    length = struct.unpack(">I", header)[0]
-    payload = b""
-    while len(payload) < length:
-        chunk = sock.recv(length - len(payload))
-        if not chunk:
-            raise ConnectionError("Connection closed")
-        payload += chunk
-    return json.loads(payload.decode("utf-8"))
-
-
-class BlenderConnection:
-    """Persistent TCP connection to Blender addon with retry logic."""
-
-    def __init__(self, host=BLENDER_HOST, port=BLENDER_PORT, max_retries=3):
-        self._host = host
-        self._port = port
-        self._max_retries = max_retries
-        self._sock = None
-
-    def _connect(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect((self._host, self._port))
-        return sock
-
-    def _ensure_connected(self):
-        """Reuse existing socket or create a new one."""
-        if self._sock is not None:
-            # Quick liveness check — peek for data without blocking
-            try:
-                self._sock.setblocking(False)
-                try:
-                    data = self._sock.recv(1, socket.MSG_PEEK)
-                    if not data:
-                        # Connection closed by server
-                        self._sock = None
-                except BlockingIOError:
-                    pass  # No data waiting — socket is alive
-                finally:
-                    if self._sock:
-                        self._sock.setblocking(True)
-            except (OSError, socket.error):
-                self._sock = None
-
-        if self._sock is None:
-            self._sock = self._connect()
-
-    def close(self):
-        if self._sock:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
-
-    def send_command(self, cmd_type, params=None, options=None):
-        """Send command with retry and per-command timeout."""
-        timeout = _SLOW_COMMANDS.get(cmd_type, _TIMEOUT_DEFAULT)
-        last_error = None
-
-        for attempt in range(self._max_retries):
-            try:
-                self._ensure_connected()
-                self._sock.settimeout(timeout)
-
-                request = {
-                    "v": PROTOCOL_VERSION,
-                    "id": str(uuid.uuid4())[:8],
-                    "type": cmd_type,
-                    "params": params or {},
-                }
-                if options:
-                    request["options"] = options
-
-                _send(self._sock, request)
-                return _recv(self._sock)
-
-            except (ConnectionError, socket.timeout, OSError) as e:
-                last_error = e
-                self.close()
-                if attempt < self._max_retries - 1:
-                    time.sleep(0.5 * (2 ** attempt))
-
-        raise ConnectionError(
-            f"Failed to connect to Blender after {self._max_retries} attempts: {last_error}"
-        )
-
-
 # Global connection instance
-_connection = BlenderConnection()
+_connection = BridgeClient(
+    host=BLENDER_HOST,
+    port=BLENDER_PORT,
+    timeout=_TIMEOUT_DEFAULT,
+    command_timeouts=_SLOW_COMMANDS,
+    max_connect_retries=3,
+)
 
 
 def blender_command(cmd_type: str, params: dict = None, options: dict = None) -> dict:
     """Send a command to Blender and return the response."""
-    return _connection.send_command(cmd_type, params, options)
+    return _connection.send(cmd_type, params, options)
 
 
 def _mutating_result(r: dict) -> str:

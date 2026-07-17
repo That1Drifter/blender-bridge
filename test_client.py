@@ -3,48 +3,26 @@
 #
 # Usage: python test_client.py
 
-import socket
-import struct
 import json
 import sys
-import time
+from bridge_client import BridgeClient, BridgeTransportError
 
 HOST = "localhost"
 PORT = 9876
-HEADER_SIZE = 4
 
 
-def encode(obj):
-    payload = json.dumps(obj, separators=(",", ":")).encode("utf-8")
-    return struct.pack(">I", len(payload)) + payload
-
-
-def recv_message(sock):
-    # Read header
-    header = b""
-    while len(header) < HEADER_SIZE:
-        chunk = sock.recv(HEADER_SIZE - len(header))
-        if not chunk:
-            raise ConnectionError("Connection closed while reading header")
-        header += chunk
-
-    length = struct.unpack(">I", header)[0]
-
-    # Read payload
-    payload = b""
-    while len(payload) < length:
-        chunk = sock.recv(length - len(payload))
-        if not chunk:
-            raise ConnectionError("Connection closed while reading payload")
-        payload += chunk
-
-    return json.loads(payload.decode("utf-8"))
-
-
-def send_and_recv(sock, request):
+def send_and_recv(client, request):
     print(f"\n>>> Sending: {request['type']}")
-    sock.sendall(encode(request))
-    response = recv_message(sock)
+    request_fields = {
+        key: value for key, value in request.items()
+        if key not in {"v", "id", "type", "params", "options"}
+    }
+    response = client.send(
+        request["type"],
+        request.get("params"),
+        request.get("options"),
+        request_fields=request_fields or None,
+    )
     print(f"<<< Status: {response.get('status')}")
     print(f"    Result: {json.dumps(response.get('result'), indent=2)[:500]}")
     if response.get("error"):
@@ -58,9 +36,9 @@ def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
 
     print(f"Connecting to {HOST}:{port}...")
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock = BridgeClient(HOST, port)
     try:
-        sock.connect((HOST, port))
+        sock.connect()
         print("Connected!\n")
 
         # Test 1: Ping
@@ -692,7 +670,7 @@ def main():
         print("ALL TESTS PASSED (Phase 1 + Phase 2 + Phase 3 + Phase 4)")
         print("=" * 40)
 
-    except ConnectionRefusedError:
+    except BridgeTransportError:
         print("ERROR: Could not connect. Is Blender running with the addon connected?")
         sys.exit(1)
     except AssertionError as e:

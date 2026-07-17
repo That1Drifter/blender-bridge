@@ -8,7 +8,9 @@ import bpy
 from .constants import (
     PROTOCOL_VERSION, ERR_UNKNOWN_COMMAND, ERR_EXECUTION_ERROR,
     ERR_OBJECT_NOT_FOUND, ERR_INVALID_PARAMS, ERR_CHECKPOINT_INVALID,
+    ERR_SANDBOX_VIOLATION,
     DEFAULT_INCLUDE_DIFF, DEFAULT_INCLUDE_SCREENSHOT, DEFAULT_SCREENSHOT_SIZE,
+    ALLOW_RAW_EXEC,
 )
 from .protocol import make_response, make_error_response
 from .executor import (
@@ -267,7 +269,7 @@ class Dispatcher:
         except SandboxViolation as e:
             return {
                 "status": "error",
-                "error": {"code": "SANDBOX_VIOLATION", "message": str(e)},
+                "error": {"code": ERR_SANDBOX_VIOLATION, "message": str(e)},
             }
         except Exception as e:
             self._invalidate_failed_mutating_command(cmd_type)
@@ -314,12 +316,27 @@ class Dispatcher:
         if mode == "safe":
             return execute_code_safe(code, history_index=self._command_count)
         elif mode == "exec":
-            return execute_code(code, history_index=self._command_count)
+            return execute_code(
+                code,
+                history_index=self._command_count,
+                allow_raw_exec=self._raw_exec_enabled(),
+            )
         else:
             raise ValueError(f"Unsupported execution mode: {mode}. Use 'exec' or 'safe'.")
 
     def _handle_get_capabilities(self):
-        return introspection.get_capabilities(self._handlers.keys(), self._resolve_options())
+        return introspection.get_capabilities(
+            self._handlers.keys(),
+            self._resolve_options(),
+            raw_exec=self._raw_exec_enabled(),
+        )
+
+    def _raw_exec_enabled(self):
+        """Return the live raw-execution policy for the active scene."""
+        scene = self._get_active_scene()
+        if scene is None:
+            return ALLOW_RAW_EXEC
+        return getattr(scene, "bbridge_allow_raw_exec", ALLOW_RAW_EXEC)
 
     def _handle_set_defaults(self, **kwargs):
         scene = self._get_active_scene()

@@ -8,7 +8,7 @@ import json
 from .constants import ENGINE_ALIASES, PROTOCOL_VERSION, VALID_ENGINES
 
 
-def get_capabilities(command_names, defaults):
+def get_capabilities(command_names, defaults, raw_exec=False):
     """Return protocol-v1 capabilities for the currently running bridge."""
     # Import lazily: package initialization imports Dispatcher, which imports this
     # module.  ``bl_info`` has already been defined before that import occurs.
@@ -30,6 +30,7 @@ def get_capabilities(command_names, defaults):
         "features": {
             "checkpoints": True,
             "polyhaven": True,
+            "raw_exec": bool(raw_exec),
             "screenshots": not bpy.app.background,
             "jobs": False,
         },

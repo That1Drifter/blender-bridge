@@ -66,6 +66,12 @@ class BBRIDGE_PT_Panel(bpy.types.Panel):
             box.prop(scene, "bbridge_auto_screenshot", text="Auto-include screenshot")
             box.prop(scene, "bbridge_screenshot_size", text="Screenshot size")
 
+        box = layout.box()
+        box.label(text="Security", icon="LOCKED")
+        box.prop(scene, "bbridge_allow_raw_exec", text="Allow Raw Exec")
+        if scene.bbridge_allow_raw_exec:
+            box.label(text="Raw Python execution enabled", icon="ERROR")
+
 
 CLASSES = [
     BBRIDGE_OT_Connect,
@@ -76,7 +82,7 @@ CLASSES = [
 
 def register_properties():
     from .constants import (
-        DEFAULT_INCLUDE_DIFF, DEFAULT_INCLUDE_SCREENSHOT, DEFAULT_PORT,
+        ALLOW_RAW_EXEC, DEFAULT_INCLUDE_DIFF, DEFAULT_INCLUDE_SCREENSHOT, DEFAULT_PORT,
         DEFAULT_SCREENSHOT_SIZE,
     )
     bpy.types.Scene.bbridge_port = IntProperty(
@@ -93,12 +99,18 @@ def register_properties():
     bpy.types.Scene.bbridge_screenshot_size = IntProperty(
         name="Screenshot Size", default=DEFAULT_SCREENSHOT_SIZE, min=256, max=2048
     )
+    bpy.types.Scene.bbridge_allow_raw_exec = BoolProperty(
+        name="Allow Raw Exec",
+        description="Allow arbitrary Python execution with Blender process permissions",
+        default=ALLOW_RAW_EXEC,
+    )
 
 
 def unregister_properties():
     props = [
         "bbridge_port", "bbridge_connected", "bbridge_show_defaults",
         "bbridge_auto_diff", "bbridge_auto_screenshot", "bbridge_screenshot_size",
+        "bbridge_allow_raw_exec",
     ]
     for p in props:
         if hasattr(bpy.types.Scene, p):

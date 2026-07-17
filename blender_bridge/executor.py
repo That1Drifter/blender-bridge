@@ -13,7 +13,8 @@ import os
 import tempfile
 import urllib.request
 
-from .constants import ENGINE_ALIASES, VALID_ENGINES
+from .constants import ALLOW_RAW_EXEC, ENGINE_ALIASES, VALID_ENGINES
+from .history import audit_execution
 
 
 # ---------------------------------------------------------------------------
@@ -38,24 +39,40 @@ def _make_namespace():
 # Raw execution mode
 # ---------------------------------------------------------------------------
 
-def execute_code(code: str, history_index: int = 0) -> dict:
+def execute_code(code: str, history_index: int = 0,
+                 allow_raw_exec: bool = ALLOW_RAW_EXEC) -> dict:
     """Execute arbitrary Blender Python code (raw mode).
 
+    Raw execution is an explicit opt-in because code runs with the permissions of
+    the Blender process. This is a command-level policy gate, not a sandbox.
     Pushes an undo step before execution so it can be rolled back.
     Returns dict with 'executed' bool and 'stdout' captured output.
     """
-    namespace = _make_namespace()
+    try:
+        if not allow_raw_exec:
+            raise SandboxViolation(
+                "Raw execution is disabled. Enable 'Allow Raw Exec' in the "
+                "Blender Bridge sidebar to use mode='exec'."
+            )
 
-    bpy.ops.ed.undo_push(message=f"MCP exec #{history_index}")
+        namespace = _make_namespace()
 
-    capture = io.StringIO()
-    with redirect_stdout(capture):
-        exec(code, namespace)
+        bpy.ops.ed.undo_push(message=f"MCP exec #{history_index}")
 
-    return {
-        "executed": True,
-        "stdout": capture.getvalue(),
-    }
+        capture = io.StringIO()
+        with redirect_stdout(capture):
+            exec(code, namespace)
+
+        result = {
+            "executed": True,
+            "stdout": capture.getvalue(),
+        }
+    except Exception as exc:
+        audit_execution("execute_code", "exec", code, False, exc)
+        raise
+
+    audit_execution("execute_code", "exec", code, True)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -94,38 +111,45 @@ def _check_imports(code: str):
 
 
 def execute_code_safe(code: str, history_index: int = 0) -> dict:
-    """Execute Blender Python code with import and builtin restrictions.
+    """Execute Blender Python code with import and builtin guardrails.
 
-    Blocks dangerous modules (os, sys, subprocess, etc.) and
-    dangerous builtins (open, eval, __import__, etc.).
+    This blocks selected modules and builtins to reduce accidental foot-guns. It
+    is bypassable by construction and is not a security sandbox.
     """
-    # Static check for blocked imports
-    _check_imports(code)
+    try:
+        # Static check for blocked imports
+        _check_imports(code)
 
-    # Build restricted builtins
-    safe_builtins = {
-        k: v for k, v in vars(builtins).items()
-        if k not in BLOCKED_BUILTINS
-    }
+        # Build restricted builtins
+        safe_builtins = {
+            k: v for k, v in vars(builtins).items()
+            if k not in BLOCKED_BUILTINS
+        }
 
-    namespace = _make_namespace()
-    namespace["__builtins__"] = safe_builtins
+        namespace = _make_namespace()
+        namespace["__builtins__"] = safe_builtins
 
-    bpy.ops.ed.undo_push(message=f"MCP safe exec #{history_index}")
+        bpy.ops.ed.undo_push(message=f"MCP safe exec #{history_index}")
 
-    capture = io.StringIO()
-    with redirect_stdout(capture):
-        exec(code, namespace)
+        capture = io.StringIO()
+        with redirect_stdout(capture):
+            exec(code, namespace)
 
-    return {
-        "executed": True,
-        "stdout": capture.getvalue(),
-        "mode": "safe",
-    }
+        result = {
+            "executed": True,
+            "stdout": capture.getvalue(),
+            "mode": "safe",
+        }
+    except Exception as exc:
+        audit_execution("execute_code", "safe", code, False, exc)
+        raise
+
+    audit_execution("execute_code", "safe", code, True)
+    return result
 
 
 class SandboxViolation(Exception):
-    """Raised when safe mode blocks a dangerous operation."""
+    """Raised when an execution guardrail rejects a request."""
     pass
 
 
@@ -139,24 +163,41 @@ def execute_operations(operations: list) -> dict:
     Each operation is {"op": "operation_name", "args": {kwargs}}.
     Returns per-operation results.
     """
-    bpy.ops.ed.undo_push(message="MCP operations batch")
+    try:
+        bpy.ops.ed.undo_push(message="MCP operations batch")
 
-    results = []
-    for i, op_def in enumerate(operations):
-        op_name = op_def.get("op", "")
-        args = op_def.get("args", {})
+        results = []
+        for i, op_def in enumerate(operations):
+            op_name = op_def.get("op", "")
+            args = op_def.get("args", {})
 
-        handler = OPERATION_REGISTRY.get(op_name)
-        if not handler:
-            results.append({"op": op_name, "status": "error", "message": f"Unknown operation: {op_name}"})
-            continue
-        try:
-            result = handler(args)
-            results.append({"op": op_name, "status": "success", "result": result})
-        except Exception as e:
-            results.append({"op": op_name, "status": "error", "message": str(e)})
+            handler = OPERATION_REGISTRY.get(op_name)
+            if not handler:
+                results.append({"op": op_name, "status": "error", "message": f"Unknown operation: {op_name}"})
+                continue
+            try:
+                result = handler(args)
+                results.append({"op": op_name, "status": "success", "result": result})
+            except Exception as e:
+                results.append({"op": op_name, "status": "error", "message": str(e)})
 
-    return {"results": results}
+        response = {"results": results}
+    except Exception as exc:
+        audit_execution("execute_operations", "operations", operations, False, exc)
+        raise
+
+    failures = [result for result in results if result["status"] == "error"]
+    if failures:
+        audit_execution(
+            "execute_operations",
+            "operations",
+            operations,
+            False,
+            f"{len(failures)} of {len(results)} operations returned an error",
+        )
+    else:
+        audit_execution("execute_operations", "operations", operations, True)
+    return response
 
 
 # ---------------------------------------------------------------------------

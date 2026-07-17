@@ -18,6 +18,10 @@ DEFAULT_SCREENSHOT_FORMAT = "PNG"
 SOCKET_TIMEOUT = 1.0  # seconds, for accept() loop
 RECV_BUFFER_SIZE = 65536
 
+# Security policy
+ALLOW_RAW_EXEC = False
+AUDIT_LOG_FULL_CODE = False
+
 # Engine aliases (Blender 4.x renamed EEVEE to BLENDER_EEVEE_NEXT)
 ENGINE_ALIASES = {
     "EEVEE": "BLENDER_EEVEE_NEXT",

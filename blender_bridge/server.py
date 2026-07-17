@@ -3,6 +3,7 @@
 import socket
 import threading
 import traceback
+import json
 import bpy
 
 from .constants import DEFAULT_HOST, DEFAULT_PORT, SOCKET_TIMEOUT, RECV_BUFFER_SIZE
@@ -88,6 +89,14 @@ class BlenderBridgeServer:
                 while True:
                     try:
                         msg, buffer = read_message(buffer)
+                    except json.JSONDecodeError as e:
+                        # The payload cannot be safely parsed; report the protocol error
+                        # before closing because any following frame boundary is untrusted.
+                        print(f"[MCP] Protocol error: invalid JSON: {e}")
+                        self._send(client, make_error_response(
+                            None, ERR_PROTOCOL_MISMATCH, f"Invalid JSON: {e}"
+                        ))
+                        return
                     except ValueError as e:
                         # Oversized message — send error and drop connection
                         print(f"[MCP] Protocol error: {e}")

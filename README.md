@@ -1,10 +1,14 @@
 # Blender Bridge
 
-A production assistant bridge between Claude Code and Blender. Gives Claude direct control over texturing, scene setup, export pipelines, and asset management. Built for production workflows — not modeling from scratch.
+A production automation bridge for Blender. Its stable API is a localhost
+TCP/JSON protocol that any agent or automation client can use for texturing,
+scene setup, export pipelines, and asset management. Claude Code through MCP
+is one integration, not the protocol itself. See [PROTOCOL.md](PROTOCOL.md)
+for the protocol v1 contract and a raw-socket client example.
 
 ## What This Is For
 
-You model in Blender. Claude handles the tedious parts:
+You model in Blender. Your automation client handles the tedious parts:
 
 - **Texturing** — Pull CC0 PBR materials from Poly Haven, build shader node trees, assign across objects
 - **Scene setup** — HDRI lighting, camera positioning, render settings in one sentence instead of 20 panels
@@ -21,8 +25,8 @@ Claude can't sculpt, retopologize, or do freeform modeling. If you need a charac
 
 ### Requirements
 - Blender 4.2-4.5 tested (4.5.8 LTS verified); 4.0+ expected
-- Python 3.10+ (system Python, for the MCP server)
-- Claude Code CLI
+- Python 3.10+ (system Python, for the MCP server integration)
+- Claude Code CLI (only for the Claude Code integration below)
 
 ### Install the Blender Addon
 
@@ -31,7 +35,18 @@ Claude can't sculpt, retopologize, or do freeform modeling. If you need a charac
 3. Enable "Blender Bridge" in the addon list
 4. In the 3D Viewport sidebar (N panel), find "MCP v2" and click "Start Server"
 
-### Configure Claude Code
+## Integrations
+
+### Raw TCP
+
+Any client that can open a TCP socket can use Blender Bridge directly on
+`localhost:9876`. The protocol is the stable API; see [PROTOCOL.md](PROTOCOL.md)
+for framing, envelopes, errors, feature detection, and a stdlib-only Python
+example.
+
+### Claude Code via MCP
+
+Use this optional integration to expose Blender Bridge tools to Claude Code.
 
 Add to your Claude Code settings (`~/.claude/settings.json`):
 
@@ -48,10 +63,16 @@ Add to your Claude Code settings (`~/.claude/settings.json`):
 
 Replace `python` with your Python path and `path/to/bridge_server.py` with the actual path.
 
-### Verify
+### Verify the Claude Code integration
 
 In Claude Code, the Blender Bridge tools should appear. Test with:
 > "Get the current Blender scene info"
+
+### Future Python client and CLI
+
+A dedicated Python client and CLI are planned in [issue #2](../../issues/2).
+Until then, use the raw TCP protocol directly or the Claude Code MCP
+integration above.
 
 ## Example Workflows
 
@@ -205,10 +226,12 @@ In Claude Code, the Blender Bridge tools should appear. Test with:
 ## Architecture
 
 ```
-Claude Code  -->  bridge_server.py (stdio)  -->  TCP :9876  -->  Blender addon  -->  bpy
+Any agent / automation client  -->  TCP/JSON :9876  -->  Blender addon  -->  bpy
+Claude Code  -->  bridge_server.py (stdio/MCP)  -->  TCP/JSON :9876
 ```
 
-- **bridge_server.py** — MCP tool wrappers, persistent TCP connection with retry
+- **TCP/JSON protocol** — Stable local API for any automation client; see [PROTOCOL.md](PROTOCOL.md)
+- **bridge_server.py** — Optional Claude Code MCP tool wrappers, with a persistent TCP connection and retry
 - **blender_bridge/** — Blender addon package (installed as zip)
   - `executor.py` — All mutating command handlers
   - `introspection.py` — Read-only queries, mesh validation, texture listing

@@ -730,7 +730,7 @@ def generate_lods(object: str, ratios: list = None, collection: str = None,
     """Generate LOD (Level of Detail) copies with decimation.
 
     Args:
-        object: Source object name (becomes LOD0).
+        object: Source object name.
         ratios: List of decimation ratios, e.g. [1.0, 0.5, 0.25, 0.1].
                 Defaults to [1.0, 0.5, 0.25, 0.1].
         collection: Collection name to organize LODs. Defaults to '{object}_LODs'.
@@ -742,7 +742,16 @@ def generate_lods(object: str, ratios: list = None, collection: str = None,
     if obj.type != "MESH":
         raise ValueError(f"Object '{object}' is {obj.type}, not MESH")
 
-    ratios = ratios or [1.0, 0.5, 0.25, 0.1]
+    if ratios is None:
+        ratios = [1.0, 0.5, 0.25, 0.1]
+    if (not isinstance(ratios, list) or not ratios or
+            any(not isinstance(ratio, (int, float)) or isinstance(ratio, bool)
+                or ratio <= 0.0 or ratio > 1.0 for ratio in ratios)):
+        raise ValueError(
+            "Invalid ratios: expected a non-empty list of numbers where each "
+            "ratio is > 0 and <= 1.0"
+        )
+
     bpy.ops.ed.undo_push(message=f"MCP generate_lods {object}")
 
     # Create LOD collection
@@ -751,40 +760,32 @@ def generate_lods(object: str, ratios: list = None, collection: str = None,
     if not lod_col:
         lod_col = bpy.data.collections.new(col_name)
         bpy.context.scene.collection.children.link(lod_col)
+    if obj.name in lod_col.objects:
+        lod_col.objects.unlink(obj)
 
     lods = []
-    base_verts = len(obj.data.vertices)
-
     for i, ratio in enumerate(ratios):
         lod_name = f"{object}_LOD{i}"
 
-        if i == 0 and ratio >= 1.0:
-            # LOD0 is the original — just link to collection
-            if obj.name not in [o.name for o in lod_col.objects]:
-                lod_col.objects.link(obj)
-            lods.append({
-                "name": obj.name,
-                "lod_level": i,
-                "ratio": ratio,
-                "vertices": base_verts,
-            })
-            continue
+        # Replace prior output so repeated runs produce the same object names.
+        existing_obj = bpy.data.objects.get(lod_name)
+        if existing_obj:
+            existing_mesh = existing_obj.data if existing_obj.type == "MESH" else None
+            bpy.data.objects.remove(existing_obj, do_unlink=True)
+            if existing_mesh and existing_mesh.users == 0:
+                bpy.data.meshes.remove(existing_mesh)
 
-        # Duplicate object and mesh data
-        new_mesh = obj.data.copy()
-        new_obj = obj.data.id_data.copy() if i == 0 else bpy.data.objects.new(lod_name, new_mesh)
-        if i > 0:
-            # Copy transforms
-            new_obj.location = obj.location.copy()
-            new_obj.rotation_euler = obj.rotation_euler.copy()
-            new_obj.scale = obj.scale.copy()
+        # Copying the object preserves its transforms, custom properties, and
+        # modifier stack; copy the mesh too so every LOD owns its geometry.
+        new_obj = obj.copy()
+        new_obj.data = obj.data.copy()
         new_obj.name = lod_name
-        new_obj.data = new_mesh
 
-        # Link to LOD collection
+        # obj.copy() is not linked to a collection, so this is its only link.
         lod_col.objects.link(new_obj)
 
-        # Add decimate modifier
+        vertices_source = len(new_obj.data.vertices)
+        decimate_applied = False
         if ratio < 1.0:
             mod = new_obj.modifiers.new(name=f"Decimate_LOD{i}", type="DECIMATE")
             mod.ratio = ratio
@@ -792,15 +793,20 @@ def generate_lods(object: str, ratios: list = None, collection: str = None,
             if apply:
                 bpy.context.view_layer.objects.active = new_obj
                 new_obj.select_set(True)
-                bpy.ops.object.modifier_apply(modifier=mod.name)
+                result = bpy.ops.object.modifier_apply(modifier=mod.name)
+                decimate_applied = result == {"FINISHED"}
 
-        vert_count = len(new_obj.data.vertices)
-        lods.append({
+        lod_info = {
             "name": new_obj.name,
             "lod_level": i,
             "ratio": ratio,
-            "vertices": vert_count,
-        })
+            "vertices": len(new_obj.data.vertices),
+            "vertices_source": vertices_source,
+            "decimate_applied": decimate_applied,
+        }
+        if ratio < 1.0 and not decimate_applied:
+            lod_info["vertices_note"] = "pre-decimate; modifier not applied"
+        lods.append(lod_info)
 
     return {
         "source": object,

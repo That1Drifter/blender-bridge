@@ -32,7 +32,7 @@ def get_capabilities(command_names, defaults, raw_exec=False):
             "polyhaven": True,
             "raw_exec": bool(raw_exec),
             "screenshots": not bpy.app.background,
-            "jobs": False,
+            "jobs": True,
         },
     }
 

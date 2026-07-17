@@ -8,7 +8,7 @@ import bpy
 from .constants import (
     PROTOCOL_VERSION, ERR_UNKNOWN_COMMAND, ERR_EXECUTION_ERROR,
     ERR_OBJECT_NOT_FOUND, ERR_INVALID_PARAMS, ERR_CHECKPOINT_INVALID,
-    ERR_SANDBOX_VIOLATION,
+    ERR_SANDBOX_VIOLATION, ERR_JOB_NOT_FOUND,
     DEFAULT_INCLUDE_DIFF, DEFAULT_INCLUDE_SCREENSHOT, DEFAULT_SCREENSHOT_SIZE,
     ALLOW_RAW_EXEC,
 )
@@ -34,6 +34,17 @@ from . import introspection
 from .capture import viewport_screenshot, render_image
 from .checkpoint import CheckpointInvalidError, CheckpointManager
 from .history import CommandHistory
+from .jobs import JobManager, JobNotFoundError
+
+
+_RUN_PENDING_JOB_COMMAND = "__blender_bridge_run_pending_job__"
+
+
+class _DiscardResponseClient:
+    """Socket-like sink for a main-thread slice queued behind a real response."""
+
+    def sendall(self, _payload):
+        pass
 
 
 # Commands that mutate the scene and should trigger diff computation
@@ -76,6 +87,7 @@ class Dispatcher:
         self._handlers = {}
         self._checkpoint_mgr = CheckpointManager()
         self._history = CommandHistory()
+        self._job_manager = JobManager()
 
         # Core handlers
         self._handlers["ping"] = self._handle_ping
@@ -93,7 +105,12 @@ class Dispatcher:
 
         # Capture handlers
         self._handlers["get_viewport_screenshot"] = viewport_screenshot
-        self._handlers["render_image"] = render_image
+        self._handlers["render_image"] = self._handle_render_image
+
+        # Async job control-plane handlers (intentionally non-mutating)
+        self._handlers["get_job_status"] = self._job_manager.get
+        self._handlers["cancel_job"] = self._job_manager.cancel
+        self._handlers["list_jobs"] = self._job_manager.list_jobs
 
         # Checkpoint handlers
         self._handlers["create_checkpoint"] = self._checkpoint_mgr.create
@@ -172,6 +189,13 @@ class Dispatcher:
 
     def dispatch(self, request: dict) -> dict:
         """Route a validated request to its handler and wrap with auto-feedback."""
+        if (
+            request.get("type") == _RUN_PENDING_JOB_COMMAND
+            and request.get("_job_manager") is self._job_manager
+        ):
+            self._job_manager.run_pending(max_jobs=1)
+            return make_response(request_id=request.get("id"), status="success", result=None)
+
         request_id = request.get("id")
         cmd_type = request.get("type")
         params = request.get("params", {})
@@ -217,6 +241,18 @@ class Dispatcher:
         # Log to history
         hist_index = self._history.log(cmd_type, params, result["status"], elapsed_ms)
 
+        # Background timers do not run under start_bridge.py's keep-alive loop.
+        # Queue an internal request behind this real response so the render gets
+        # a later main-thread pump slice without changing server.py.
+        if (
+            bpy.app.background
+            and cmd_type == "render_image"
+            and result["status"] == "success"
+            and isinstance(result.get("result"), dict)
+            and result["result"].get("state") == "queued"
+        ):
+            self._queue_background_job_slice()
+
         if result["status"] == "error":
             resp = result
             resp["v"] = PROTOCOL_VERSION
@@ -250,6 +286,11 @@ class Dispatcher:
             return {
                 "status": "error",
                 "error": {"code": ERR_CHECKPOINT_INVALID, "message": str(e)},
+            }
+        except JobNotFoundError as e:
+            return {
+                "status": "error",
+                "error": {"code": ERR_JOB_NOT_FOUND, "message": str(e)},
             }
         except TypeError as e:
             return {
@@ -311,6 +352,27 @@ class Dispatcher:
 
     def _handle_ping(self):
         return "pong"
+
+    def _handle_render_image(self, **params):
+        return render_image(_job_manager=self._job_manager, **params)
+
+    def _queue_background_job_slice(self):
+        """Put one internal job runner behind the current socket response."""
+        from . import _get_server
+
+        server = _get_server()
+        if server is None or not server.running:
+            return
+        server._dispatch_on_main_thread(
+            _DiscardResponseClient(),
+            {
+                "v": PROTOCOL_VERSION,
+                "id": None,
+                "type": _RUN_PENDING_JOB_COMMAND,
+                "params": {},
+                "_job_manager": self._job_manager,
+            },
+        )
 
     def _handle_execute_code(self, code: str, mode: str = "exec"):
         if mode == "safe":

@@ -35,6 +35,10 @@ from .capture import viewport_screenshot, render_image
 from .checkpoint import CheckpointInvalidError, CheckpointManager
 from .history import CommandHistory
 from .jobs import JobManager, JobNotFoundError
+from .recipes import (
+    apply_pbr_material_set, validate_game_asset, export_game_asset,
+    create_preview_sheet,
+)
 
 
 _RUN_PENDING_JOB_COMMAND = "__blender_bridge_run_pending_job__"
@@ -65,6 +69,8 @@ _MUTATING_COMMANDS = {
     "add_mirror", "array_pattern", "add_constraint", "remove_constraint",
     # Phase 6
     "polyhaven_download",
+    # High-level asset recipes
+    "apply_pbr_material_set", "export_game_asset", "create_preview_sheet",
 }
 
 
@@ -178,6 +184,13 @@ class Dispatcher:
         self._handlers["polyhaven_search"] = polyhaven_search
         self._handlers["polyhaven_download"] = polyhaven_download
         self._handlers["get_textures"] = introspection.get_textures
+
+        # High-level asset recipes. Recipes call lower-level handlers directly
+        # and return one terminal manifest instead of redispatching commands.
+        self._handlers["apply_pbr_material_set"] = apply_pbr_material_set
+        self._handlers["validate_game_asset"] = validate_game_asset
+        self._handlers["export_game_asset"] = export_game_asset
+        self._handlers["create_preview_sheet"] = create_preview_sheet
 
     def register_handler(self, command_type: str, handler):
         """Register a command handler. Used by other modules to extend the dispatcher."""

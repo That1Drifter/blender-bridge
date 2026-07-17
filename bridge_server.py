@@ -786,6 +786,53 @@ def export_scene(filepath: str, format: str = "GLB", selected_only: bool = False
     return json.dumps(r.get("result", r), indent=2)
 
 
+# ---------------------------------------------------------------------------
+# High-level asset recipes
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def apply_pbr_material_set(object: str, base_color: str = "", roughness: str = "",
+                           metallic: str = "", normal: str = "", height: str = "",
+                           texture_directory: str = "", material_name: str = "") -> str:
+    """Create and assign one PBR material from texture paths, or auto-detect maps in texture_directory."""
+    params = {"object": object}
+    for key, value in (("base_color", base_color), ("roughness", roughness),
+                       ("metallic", metallic), ("normal", normal), ("height", height),
+                       ("texture_directory", texture_directory), ("material_name", material_name)):
+        if value:
+            params[key] = value
+    return _mutating_result(blender_command("apply_pbr_material_set", params, options={"include_diff": True}))
+
+
+@mcp.tool()
+def validate_game_asset(object: str, max_tris: int = -1) -> str:
+    """Read-only game-asset validation. Returns a versioned recipe manifest with warnings and errors."""
+    params = {"object": object}
+    if max_tris >= 0:
+        params["max_tris"] = max_tris
+    r = blender_command("validate_game_asset", params)
+    return json.dumps(r.get("result", r), indent=2)
+
+
+@mcp.tool()
+def export_game_asset(object: str, out_path: str, preset: str = "godot",
+                      max_tris: int = -1) -> str:
+    """Validate then export exactly one object with preset dayz, godot, or print."""
+    params = {"object": object, "out_path": out_path, "preset": preset}
+    if max_tris >= 0:
+        params["max_tris"] = max_tris
+    return _mutating_result(blender_command("export_game_asset", params, options={"include_diff": True}))
+
+
+@mcp.tool()
+def create_preview_sheet(object: str, out_path: str, resolution: int = 256) -> str:
+    """Render front, side, top, and three-quarter PNG previews; returns their manifest and SHA-256 values."""
+    r = blender_command("create_preview_sheet", {
+        "object": object, "out_path": out_path, "resolution": resolution,
+    }, options={"include_diff": True})
+    return _mutating_result(r)
+
+
 @mcp.tool()
 def generate_lods(object: str, ratios: list = None, collection: str = "",
                   apply: bool = False) -> str:

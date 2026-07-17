@@ -8,12 +8,14 @@ use it; the MCP server is only one client implementation.
 The addon listens on `localhost:9876` by default. It is a localhost-only,
 unauthenticated TCP service, so do not expose the port to an untrusted network.
 
-The server accepts one client connection at a time. A client may reconnect
-freely. Requests are dispatched sequentially on Blender's main thread and each
-response is correlated with the request's `id`. Clients are responsible for
-choosing unique IDs. If a connection drops after a mutating request was sent,
-do not blindly resend it: its response may have been lost after Blender already
-performed the operation.
+The server accepts multiple concurrent client connections. Requests from all
+clients execute sequentially on Blender's main thread, and each response is
+sent to the client that submitted its request. Per-connection ordering follows
+submission order; cross-client interleaving is unspecified. Clients are
+responsible for choosing unique IDs. A `BridgeClient` instance is not
+thread-safe: use one per thread or guard it with a lock. If a connection drops
+after a mutating request was sent, do not blindly resend it: its response may
+have been lost after Blender already performed the operation.
 
 ## Framing
 

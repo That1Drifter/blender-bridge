@@ -19,7 +19,7 @@ You model in Blender. Your automation client handles the tedious parts:
 
 ## What This Is NOT For
 
-Claude can't sculpt, retopologize, or do freeform modeling. If you need a character or hard-surface model, build it yourself (or import one), then use this tool to texture it, light it, validate it, and export it.
+AI assistants cannot replace hands-on sculpting, retopology, or freeform modeling. If you need a character or hard-surface model, build it yourself (or import one), then use this tool to texture it, light it, validate it, and export it.
 
 ## Setup
 
@@ -33,7 +33,7 @@ Claude can't sculpt, retopologize, or do freeform modeling. If you need a charac
 1. Download `blender_bridge.zip` from this repo
 2. In Blender: Edit > Preferences > Add-ons > Install from Disk > select the zip
 3. Enable "Blender Bridge" in the addon list
-4. In the 3D Viewport sidebar (N panel), find "MCP v2" and click "Start Server"
+4. In the 3D Viewport sidebar (N panel), open the **Bridge** tab, find the **Blender Bridge** panel, and click **Connect**
 
 ### Headless usage
 
@@ -84,11 +84,31 @@ Replace `python` with your Python path and `path/to/bridge_server.py` with the a
 In Claude Code, the Blender Bridge tools should appear. Test with:
 > "Get the current Blender scene info"
 
-### Future Python client and CLI
+### Python client and CLI
 
-A dedicated Python client and CLI are planned in [issue #2](../../issues/2).
-Until then, use the raw TCP protocol directly or the Claude Code MCP
-integration above.
+`bridge_client` is a bpy-free Python client for the TCP service:
+
+```python
+from bridge_client import BridgeClient
+
+with BridgeClient() as client:
+    print(client.send("get_scene_info"))
+```
+
+Use the CLI either through the installed `blender-bridge` command or the
+backward-compatible script:
+
+```bash
+blender-bridge get_scene_info
+python bb_client.py call get_scene_info
+python bb_client.py call execute_code --json '{"code":"print(len(bpy.data.objects))","mode":"safe"}'
+python bb_client.py export --preset godot --out build/scene.gltf
+```
+
+`execute --file script.py` uses raw `exec` mode and requires enabling **Allow
+Raw Exec** in the Blender Bridge panel. CLI exit codes are `0` for a successful
+response, `1` for a bridge error response, `2` for a connection or transport
+failure, and `3` for invalid arguments or unreadable input files.
 
 ## Example Workflows
 
@@ -247,7 +267,7 @@ Claude Code  -->  bridge_server.py (stdio/MCP)  -->  TCP/JSON :9876
 ```
 
 - **TCP/JSON protocol** — Stable local API for any automation client; see [PROTOCOL.md](PROTOCOL.md)
-- **bridge_server.py** — Optional Claude Code MCP tool wrappers, with a persistent TCP connection and retry
+- **bridge_server.py** — Optional MCP tool wrappers (for example, Claude Code), with a persistent TCP connection and retry
 - **blender_bridge/** — Blender addon package (installed as zip)
   - `executor.py` — All mutating command handlers
   - `introspection.py` — Read-only queries, mesh validation, texture listing

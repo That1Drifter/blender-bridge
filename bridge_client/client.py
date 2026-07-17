@@ -53,6 +53,9 @@ class BridgeClient:
     A request is retried only if its socket write failed before any bytes were
     written. Failures after any write, including response timeouts, close the
     socket and raise :class:`BridgeTransportError` instead of resending.
+
+    Instances are not thread-safe; use one per thread or guard access with a
+    lock.
     """
 
     def __init__(

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Blender Bridge Server — MCP interface between Claude Code and Blender.
+Blender Bridge Server — MCP interface between MCP clients and Blender.
 
 Exposes Blender commands as MCP tools. Connects to the Blender addon's
 TCP socket server on localhost:9876 using length-prefixed JSON framing.
@@ -595,9 +595,13 @@ def get_viewport_screenshot(max_size: int = 512, save_to: str = "") -> str:
 @mcp.tool()
 def render_image(engine: str = "", samples: int = 0,
                  resolution_x: int = 512, resolution_y: int = 512,
-                 save_to: str = "") -> str:
-    """Render the scene and return the image. Valid engines: EEVEE, CYCLES, WORKBENCH. If save_to path is provided, saves full render there and returns just the path. Otherwise returns a small JPEG thumbnail as base64 plus a file_path to the full render."""
-    params = {"resolution": [resolution_x, resolution_y], "format": "PNG"}
+                 save_to: str = "", async_mode: bool = False) -> str:
+    """Render the scene and return the image, or queue a job when async_mode is true. Valid engines: EEVEE, CYCLES, WORKBENCH. If save_to path is provided, saves full render there and returns just the path. Otherwise returns a small JPEG thumbnail as base64 plus a file_path to the full render."""
+    params = {
+        "resolution": [resolution_x, resolution_y],
+        "format": "PNG",
+        "async_mode": async_mode,
+    }
     if engine:
         params["engine"] = engine
     if samples:
@@ -607,6 +611,29 @@ def render_image(engine: str = "", samples: int = 0,
     r = blender_command("render_image", params)
     result = r.get("result", r)
     return json.dumps(result, indent=2)
+
+
+# --- Async Jobs ---
+
+@mcp.tool()
+def get_job_status(job_id: str) -> str:
+    """Get the current state, progress, result, or error for an async job."""
+    r = blender_command("get_job_status", {"job_id": job_id})
+    return json.dumps(r.get("result", r), indent=2)
+
+
+@mcp.tool()
+def cancel_job(job_id: str) -> str:
+    """Request cancellation of a queued or running async job."""
+    r = blender_command("cancel_job", {"job_id": job_id})
+    return json.dumps(r.get("result", r), indent=2)
+
+
+@mcp.tool()
+def list_jobs() -> str:
+    """List all async jobs and their current states."""
+    r = blender_command("list_jobs")
+    return json.dumps(r.get("result", r), indent=2)
 
 
 # --- Checkpoints ---
@@ -923,12 +950,19 @@ def polyhaven_search(asset_type: str = "", categories: str = "",
 
 @mcp.tool()
 def polyhaven_download(asset_id: str, asset_type: str, resolution: str = "1k",
-                       format: str = "", apply_to: str = "") -> str:
+                       format: str = "", apply_to: str = "",
+                       async_mode: bool = False) -> str:
     """Download a Poly Haven asset and import into Blender.
     asset_type: 'hdris' (sets world environment), 'textures' (creates PBR material),
     'models' (imports geometry). resolution: '1k', '2k', '4k'.
-    apply_to: object name to assign texture material to (textures only)."""
-    params = {"asset_id": asset_id, "asset_type": asset_type, "resolution": resolution}
+    apply_to: object name to assign texture material to (textures only). Set
+    async_mode to queue the download and import as a job."""
+    params = {
+        "asset_id": asset_id,
+        "asset_type": asset_type,
+        "resolution": resolution,
+        "async_mode": async_mode,
+    }
     if format:
         params["format"] = format
     if apply_to:

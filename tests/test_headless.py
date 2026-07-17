@@ -1,7 +1,4 @@
-"""End-to-end acceptance test for the background Blender Bridge launcher.
-
-Run with the system Python: ``python tests/test_headless.py``.
-"""
+"""End-to-end acceptance test for the background Blender Bridge launcher."""
 
 import os
 import signal
@@ -9,11 +6,14 @@ import socket
 import subprocess
 import sys
 import time
+import unittest
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BLENDER_EXE = Path(r"C:/Program Files/Blender Foundation/Blender 4.5/blender.exe")
+BLENDER_EXE = Path(os.environ.get(
+    "BLENDER_EXE", r"C:/Program Files/Blender Foundation/Blender 4.5/blender.exe"
+))
 PORT = 9876
 
 sys.path.insert(0, str(REPO_ROOT))
@@ -51,53 +51,53 @@ def stop_process(process):
             process.wait(timeout=10)
 
 
-def main():
-    if not BLENDER_EXE.is_file():
-        raise FileNotFoundError(f"Blender executable not found: {BLENDER_EXE}")
+@unittest.skipUnless(BLENDER_EXE.is_file(), "Blender not available")
+class HeadlessBridgeTests(unittest.TestCase):
+    def test_background_bridge(self):
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        process = subprocess.Popen(
+            [
+                str(BLENDER_EXE), "--background", "--factory-startup",
+                "--python", str(REPO_ROOT / "start_bridge.py"), "--", "--port", str(PORT),
+            ],
+            cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            creationflags=creationflags,
+        )
 
-    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-    process = subprocess.Popen(
-        [
-            str(BLENDER_EXE), "--background", "--factory-startup",
-            "--python", str(REPO_ROOT / "start_bridge.py"), "--", "--port", str(PORT),
-        ],
-        cwd=REPO_ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        creationflags=creationflags,
-    )
+        try:
+            wait_for_port(process)
+            with BridgeClient(port=PORT, timeout=10.0) as client:
+                ping = client.send("ping")
+                print(f"ping: {ping}")
+                self.assertEqual(ping["status"], "success", ping)
+                self.assertEqual(ping["result"], "pong", ping)
 
-    try:
-        wait_for_port(process)
-        with BridgeClient(port=PORT, timeout=10.0) as client:
-            ping = client.send("ping")
-            print(f"ping: {ping}")
-            assert ping["status"] == "success" and ping["result"] == "pong", ping
+                scene = client.send("get_scene_info")
+                print(f"get_scene_info: {scene}")
+                self.assertEqual(scene["status"], "success", scene)
 
-            scene = client.send("get_scene_info")
-            print(f"get_scene_info: {scene}")
-            assert scene["status"] == "success", scene
+                capabilities = client.send("get_capabilities")
+                print(f"get_capabilities: {capabilities}")
+                self.assertEqual(capabilities["status"], "success", capabilities)
+                self.assertTrue(capabilities["result"]["background"], capabilities)
+                self.assertFalse(capabilities["result"]["features"]["screenshots"], capabilities)
 
-            capabilities = client.send("get_capabilities")
-            print(f"get_capabilities: {capabilities}")
-            assert capabilities["status"] == "success", capabilities
-            assert capabilities["result"]["background"] is True, capabilities
-            assert capabilities["result"]["features"]["screenshots"] is False, capabilities
-
-            screenshot = client.send("get_viewport_screenshot")
-            print(f"get_viewport_screenshot: {screenshot}")
-            assert screenshot["status"] == "error", screenshot
-            assert screenshot["error"]["code"] == "UNSUPPORTED_IN_BACKGROUND", screenshot
-
-        print("HEADLESS E2E PASS")
-    finally:
-        stop_process(process)
-        output = process.stdout.read() if process.stdout else ""
-        if output:
-            print("Blender output:")
-            print(output.rstrip())
+                screenshot = client.send("get_viewport_screenshot")
+                print(f"get_viewport_screenshot: {screenshot}")
+                self.assertEqual(screenshot["status"], "error", screenshot)
+                self.assertEqual(screenshot["error"]["code"], "UNSUPPORTED_IN_BACKGROUND", screenshot)
+        finally:
+            stop_process(process)
+            output = process.stdout.read() if process.stdout else ""
+            if process.stdout:
+                process.stdout.close()
+            if output:
+                print("Blender output:")
+                print(output.rstrip())
 
 
 if __name__ == "__main__":
-    main()
+    unittest.main(verbosity=2)

@@ -18,8 +18,8 @@ jobs:
         run: ruff check .
       - name: Build Blender addon
         run: python build.py
-      - name: Run Blender-free unit tests
-        run: python -m unittest discover tests -p "test_c*.py"
+      - name: Run tests
+        run: python -m unittest discover tests -p 'test_*.py'
       - name: Verify addon archive contents
         run: |
           unzip -l blender_bridge.zip

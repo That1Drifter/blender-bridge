@@ -697,7 +697,7 @@ def export_scene(filepath: str, format: str = "GLB",
         if preset and preset.lower() == "print":
             kwargs["global_scale"] = 1.0
             kwargs["use_scene_unit"] = True
-            kwargs["ascii"] = False
+            kwargs["ascii_format"] = False
         bpy.ops.wm.stl_export(**kwargs)
 
     exporters = {

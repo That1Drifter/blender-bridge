@@ -20,7 +20,7 @@ Claude can't sculpt, retopologize, or do freeform modeling. If you need a charac
 ## Setup
 
 ### Requirements
-- Blender 4.0+
+- Blender 4.2-4.5 tested (4.5.8 LTS verified); 4.0+ expected
 - Python 3.10+ (system Python, for the MCP server)
 - Claude Code CLI
 

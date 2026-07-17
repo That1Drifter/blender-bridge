@@ -5,7 +5,7 @@ import traceback
 
 from .constants import (
     PROTOCOL_VERSION, ERR_UNKNOWN_COMMAND, ERR_EXECUTION_ERROR,
-    ERR_OBJECT_NOT_FOUND, ERR_INVALID_PARAMS,
+    ERR_OBJECT_NOT_FOUND, ERR_INVALID_PARAMS, ERR_CHECKPOINT_INVALID,
     DEFAULT_INCLUDE_DIFF, DEFAULT_INCLUDE_SCREENSHOT, DEFAULT_SCREENSHOT_SIZE,
 )
 from .protocol import make_response, make_error_response
@@ -28,7 +28,7 @@ from .executor import (
 )
 from . import introspection
 from .capture import viewport_screenshot, render_image
-from .checkpoint import CheckpointManager
+from .checkpoint import CheckpointInvalidError, CheckpointManager
 from .history import CommandHistory
 
 
@@ -234,6 +234,11 @@ class Dispatcher:
         try:
             result = handler(**params)
             return {"status": "success", "result": result}
+        except CheckpointInvalidError as e:
+            return {
+                "status": "error",
+                "error": {"code": ERR_CHECKPOINT_INVALID, "message": str(e)},
+            }
         except TypeError as e:
             return {
                 "status": "error",
@@ -255,11 +260,22 @@ class Dispatcher:
                 "error": {"code": "SANDBOX_VIOLATION", "message": str(e)},
             }
         except Exception as e:
+            self._invalidate_failed_mutating_command(cmd_type)
             traceback.print_exc()
             return {
                 "status": "error",
                 "error": {"code": ERR_EXECUTION_ERROR, "message": str(e)},
             }
+
+    def _invalidate_failed_mutating_command(self, cmd_type: str):
+        """Discard undo-step assumptions after a mutating handler fails mid-execution.
+
+        Validation errors (TypeError/KeyError/ValueError/SandboxViolation) are raised
+        before a handler's undo_push per the handler pattern, so they leave the undo
+        stack untouched and checkpoints stay valid.
+        """
+        if cmd_type in _MUTATING_COMMANDS:
+            self._checkpoint_mgr.invalidate_all("command_failed")
 
     def _handle_batch(self, request: dict, opts: dict) -> dict:
         """Execute a batch of commands sequentially."""

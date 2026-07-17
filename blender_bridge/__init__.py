@@ -1,6 +1,8 @@
 # Blender Bridge
 # A production assistant bridge for controlling Blender via Claude
 
+import bpy
+
 bl_info = {
     "name": "Blender Bridge",
     "author": "Drifter",
@@ -18,6 +20,13 @@ from .constants import DEFAULT_HOST
 # Module-level singleton
 _server_instance = None
 _dispatcher_instance = None
+
+
+@bpy.app.handlers.persistent
+def _clear_checkpoints_after_load(_unused):
+    """Discard bridge checkpoints after Blender rebuilds undo history on file load."""
+    if _dispatcher_instance:
+        _dispatcher_instance._checkpoint_mgr.clear_all("file_loaded")
 
 
 def _get_server():
@@ -46,20 +55,22 @@ def _stop_server():
 
 
 def register():
-    import bpy
     from .ui import CLASSES, register_properties
 
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     register_properties()
+    if _clear_checkpoints_after_load not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_clear_checkpoints_after_load)
     print("[Bridge] Blender Bridge addon registered")
 
 
 def unregister():
-    import bpy
     from .ui import CLASSES, unregister_properties
 
     _stop_server()
+    if _clear_checkpoints_after_load in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_clear_checkpoints_after_load)
     unregister_properties()
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
